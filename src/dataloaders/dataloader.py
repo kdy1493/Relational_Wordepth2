@@ -1,10 +1,13 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 import numpy as np
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 import os
 import random
+import cv2
 
 
 def _is_pil_image(img):
@@ -26,13 +29,23 @@ class NewDataLoader(object):
         if mode == 'train':
             self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
 
-            self.train_sampler = None
+            if getattr(args, 'use_ddp', False) and torch.distributed.is_initialized():
+                self.train_sampler = DistributedSampler(
+                    self.training_samples, shuffle=True
+                )
+            else:
+                self.train_sampler = None
 
-            self.data = DataLoader(self.training_samples, args.batch_size,
-                                   shuffle=(self.train_sampler is None),
-                                   num_workers=args.num_threads,
-                                   pin_memory=True,
-                                   sampler=self.train_sampler)
+            self.data = DataLoader(
+                self.training_samples,
+                args.batch_size,
+                shuffle=(self.train_sampler is None),
+                num_workers=args.num_threads,
+                pin_memory=True,
+                sampler=self.train_sampler,
+                persistent_workers=True if args.num_threads > 0 else False,
+                prefetch_factor=4 if args.num_threads > 0 else None,
+            )
 
         elif mode == 'online_eval':
             self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
@@ -66,6 +79,33 @@ class DataLoadPreprocess(Dataset):
         self.transform = transform
         self.to_tensor = ToTensor
         self.is_for_online_eval = is_for_online_eval
+        
+        # Image cache
+        self.image_cache = {}
+        self.cache_images = getattr(args, 'cache_images', False)
+        
+        if self.cache_images and mode == 'train':
+            from tqdm import tqdm
+            print(f"Caching {len(self.filenames)} images to memory...")
+            for idx in tqdm(range(len(self.filenames)), desc="Loading images"):
+                sample_path = self.filenames[idx]
+                if self.args.dataset == 'kitti':
+                    rgb_file = sample_path.split()[0]
+                    depth_file = sample_path.split()[1]
+                else:
+                    rgb_file = sample_path.split()[0][1:]
+                    depth_file = sample_path.split()[1][1:]
+                
+                image_path = os.path.join(self.args.data_path, rgb_file)
+                depth_path = os.path.join(self.args.gt_path, depth_file)
+                
+                image_cv = cv2.imread(image_path, cv2.IMREAD_COLOR)
+                depth_cv = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                
+                self.image_cache[image_path] = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
+                self.image_cache[depth_path] = depth_cv
+            
+            print(f"Cached {len(self.image_cache)//2} image pairs (~{len(self.image_cache)*640*480*2/1024/1024/1024:.1f} GB)")
 
     def __getitem__(self, idx):
         sample_path = self.filenames[idx]
@@ -87,8 +127,16 @@ class DataLoadPreprocess(Dataset):
             image_path = os.path.join(self.args.data_path, rgb_file)
             depth_path = os.path.join(self.args.gt_path, depth_file)
 
-            image = Image.open(image_path)
-            depth_gt = Image.open(depth_path)
+            # Use cached images if available
+            if self.cache_images and image_path in self.image_cache:
+                image = Image.fromarray(self.image_cache[image_path])
+                depth_gt = Image.fromarray(self.image_cache[depth_path])
+            else:
+                # Use cv2 for faster loading
+                image_cv = cv2.imread(image_path, cv2.IMREAD_COLOR)
+                image = Image.fromarray(cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB))
+                depth_cv = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                depth_gt = Image.fromarray(depth_cv)
 
             if self.args.do_kb_crop is True:
                 height = image.height
@@ -120,7 +168,7 @@ class DataLoadPreprocess(Dataset):
             depth_gt = np.expand_dims(depth_gt, axis=2)
 
             if self.args.dataset == 'nyu':
-                depth_gt = depth_gt / 1000.0
+                depth_gt = depth_gt / getattr(self.args, 'depth_scale', 6553.5)
             else:
                 depth_gt = depth_gt / 256.0
 
@@ -130,32 +178,42 @@ class DataLoadPreprocess(Dataset):
             sample = {'image': image, 'depth': depth_gt, 'focal': focal, "sample_path": sample_path}
 
         else:
+            # online_eval or test mode - use original resolution (no resize/crop)
             if self.mode == 'online_eval':
                 data_path = self.args.data_path_eval
+                gt_path = self.args.gt_path_eval
             else:
                 data_path = self.args.data_path
+                gt_path = self.args.gt_path
 
-            image_path = os.path.join(data_path, sample_path.split()[0])
-            image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
-
+            rgb_file = sample_path.split()[0]
+            depth_file = sample_path.split()[1]
+            # Remove leading slash for NYU dataset paths
+            if self.args.dataset == 'nyu':
+                rgb_file = rgb_file.lstrip('/')
+                depth_file = depth_file.lstrip('/')
+            
+            image_path = os.path.join(data_path, rgb_file)
+            depth_path = os.path.join(gt_path, depth_file)
+            
+            # Load image (cv2 to avoid PIL lazy-load AssertionError in DataLoader workers)
+            image_cv = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            if image_cv is None:
+                raise FileNotFoundError(f"Could not load image: {image_path}")
+            image = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            has_valid_depth = False
+            depth_gt = None
+            
             if self.mode == 'online_eval':
-                gt_path = self.args.gt_path_eval
-                depth_path = os.path.join(gt_path, sample_path.split()[1])
-                has_valid_depth = False
-                try:
-                    depth_gt = Image.open(depth_path)
+                depth_cv = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                if depth_cv is not None:
                     has_valid_depth = True
-                except IOError:
-                    depth_gt = False
-                    print('Missing gt for {}'.format(image_path))
-
-                if has_valid_depth:
-                    depth_gt = np.asarray(depth_gt, dtype=np.float32)
-                    depth_gt = np.expand_dims(depth_gt, axis=2)
+                    depth_gt = depth_cv.astype(np.float32)
                     if self.args.dataset == 'nyu':
-                        depth_gt = depth_gt / 1000.0
+                        depth_gt = depth_gt / getattr(self.args, 'depth_scale', 6553.5)
                     else:
                         depth_gt = depth_gt / 256.0
+                    depth_gt = np.expand_dims(depth_gt, axis=2)
 
             if self.args.do_kb_crop is True:
                 height = image.shape[0]
@@ -163,8 +221,16 @@ class DataLoadPreprocess(Dataset):
                 top_margin = int(height - 352)
                 left_margin = int((width - 1216) / 2)
                 image = image[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
-                if self.mode == 'online_eval' and has_valid_depth:
+                if has_valid_depth:
                     depth_gt = depth_gt[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
+
+            # Resize to train resolution for consistent eval (256x320)
+            if self.mode == 'online_eval' and (image.shape[0] != self.args.input_height or image.shape[1] != self.args.input_width):
+                image = cv2.resize(image, (self.args.input_width, self.args.input_height), interpolation=cv2.INTER_LINEAR)
+                if has_valid_depth:
+                    depth_gt = cv2.resize(depth_gt, (self.args.input_width, self.args.input_height), interpolation=cv2.INTER_NEAREST)
+                    if depth_gt.ndim == 2:
+                        depth_gt = np.expand_dims(depth_gt, axis=2)
 
             if self.mode == 'online_eval':
                 sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth, "sample_path": sample_path}

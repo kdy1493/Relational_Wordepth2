@@ -1,1 +1,0 @@
-A store with a bunch of shirts on display in it.

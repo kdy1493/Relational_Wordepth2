@@ -1,1 +1,0 @@
-A library with a table full of books.

@@ -4,7 +4,10 @@ import torch.distributed as dist
 from torch.utils.data import Sampler
 from torchvision import transforms
 
-import os, sys
+import os
+import sys
+from typing import Any, Dict, List
+
 import numpy as np
 import math
 
@@ -14,6 +17,68 @@ def convert_arg_line_to_args(arg_line):
         if not arg.strip():
             continue
         yield arg
+
+
+# -----------------------------------------------------------------------------
+# YAML config support (configs/*.yaml); merges "include" and converts to argv.
+# -----------------------------------------------------------------------------
+
+def _load_yaml_config(path: str) -> Dict[str, Any]:
+    """Load a single YAML file. Resolve 'include' relative to this file's directory and merge (later overrides)."""
+    import yaml
+    path = os.path.abspath(path)
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    base_dir = os.path.dirname(path)
+    includes = data.pop("include", None)
+    if includes is not None:
+        if isinstance(includes, str):
+            includes = [includes]
+        merged: Dict[str, Any] = {}
+        for inc in includes:
+            inc_path = inc if os.path.isabs(inc) else os.path.normpath(os.path.join(base_dir, inc))
+            merged.update(_load_yaml_config(inc_path))
+        for k, v in data.items():
+            merged[k] = v
+        return merged
+    return data
+
+
+def _yaml_dict_to_argv(data: Dict[str, Any]) -> List[str]:
+    """Convert flat YAML dict to argv list: --key value; bool True -> --key, False/None -> omit."""
+    out: List[str] = []
+    for k, v in data.items():
+        if v is None:
+            continue
+        key = k if (isinstance(k, str) and k.startswith("--")) else ("--" + str(k))
+        if isinstance(v, bool):
+            if v:
+                out.append(key)
+            continue
+        out.append(key)
+        out.append(str(v))
+    return out
+
+
+def expand_argv_yaml(argv: List[str], repo_root: str) -> List[str]:
+    """
+    Replace any .yaml/.yml config path (with optional @ prefix) with expanded --key value args.
+    Paths are resolved against repo_root when relative. Preserves order and non-yaml args.
+    """
+    expanded: List[str] = []
+    for raw in argv:
+        path = raw.lstrip("@")
+        if not path.endswith(".yaml") and not path.endswith(".yml"):
+            expanded.append(raw)
+            continue
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(repo_root, path))
+        if not os.path.isfile(path):
+            expanded.append(raw)
+            continue
+        cfg = _load_yaml_config(path)
+        expanded.extend(_yaml_dict_to_argv(cfg))
+    return expanded
 
 
 def block_print():

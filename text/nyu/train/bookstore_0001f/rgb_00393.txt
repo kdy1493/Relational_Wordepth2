@@ -1,1 +1,0 @@
-A library with boxes and other books in it.

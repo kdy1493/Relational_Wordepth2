@@ -1,0 +1,54 @@
+# SAM2 + GT-Depth 기반 Relational Annotations 생성 설정
+# 사용법:
+#   Train: python src/relation_generation/generate_relational_annotations.py --config configs/config_relational_gen.yaml --mode train
+#   Test:  python src/relation_generation/generate_relational_annotations.py --config configs/config_relational_gen.yaml --mode test
+#
+# relation_style: median (기본) | statistical
+#   median     : median depth + 0.3~3.0m + 공간 인접 (Relational-WorDepth)
+#   statistical: μ, σ, M 기반 (Robustness 논문)
+#
+# ============================================================================
+# TRAIN 데이터셋 설정 (data/nyu_v2_sync 구조에 맞춤)
+# ============================================================================
+train:
+  dataset: nyu
+  split: train
+
+  # 경로: data/nyu_v2_sync/train 아래 scene별 디렉토리 (office_kitchen_0001b, bedroom_0138, ...)
+  # 각 scene 내: rgb_XXXXX.jpg, dense/sync_depth_dense_XXXXX.png
+  base_dir: ./data/nyu_v2_sync/train
+  out_base_dir: ./data/nyu_relational/statistical_train
+
+  # depth_dir: null 이면 base_dir과 동일 (scene 내 dense/ 도 자동 탐색)
+  depth_dir: null
+  text_dir: null
+
+  # SAM2 체크포인트 (프로젝트 루트 또는 절대경로)
+  sam_ckpt: ./sam2_b.pt
+  sam_points_per_side: 8
+  sam_min_region_area: 500
+  yolo_conf_thresh: 0.5
+  sam_max_objects: 15
+
+  use_depth_gt: true
+  relation_style: statistical
+  max_rel_per_object: 5
+
+  device: cuda:2
+
+# ============================================================================
+# TEST 데이터셋 설정 (필요 시 주석 해제 후 --mode test)
+# ============================================================================
+# test:
+#   dataset: nyu
+#   split: test
+#   base_dir: ./data/nyu_v2_sync/test
+#   out_base_dir: ./data/nyu_relational/test_statistical
+#   depth_dir: null
+#   sam_ckpt: ./sam2_b.pt
+#   sam_points_per_side: 8
+#   sam_min_region_area: 500
+#   sam_max_objects: 15
+#   relation_style: statistical
+#   max_rel_per_object: 5
+#   device: cuda:1

@@ -1,5 +1,42 @@
-__pycache__
-*/__pycache__
-models
-swin_large_patch4_window12_384_22k.pth
-weights
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.code-workspace
+.cursor/
+
+# Data & annotations
+data/
+text/
+# 필요한 경우 샘플만 별도 디렉토리에 두고 commit
+
+# Relational annotation visualizations
+data/nyu_relational/anno_median_vis/
+data/nyu_relational/anno_stat_vis/
+data/nyu_relational/anno_statvis/
+
+# Training outputs
+runs/
+logs/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Cursor terminals
+*.log
+terminals/

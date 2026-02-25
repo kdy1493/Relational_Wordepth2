@@ -1,1 +1,0 @@
-A counter with a counter with a sign on it.

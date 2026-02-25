@@ -1,1 +1,0 @@
-A store with baskets on display in a store.

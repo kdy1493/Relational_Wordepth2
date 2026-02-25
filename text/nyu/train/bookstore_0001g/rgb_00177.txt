@@ -1,1 +1,0 @@
-A library with boxes of books on the shelves.

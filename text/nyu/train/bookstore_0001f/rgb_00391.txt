@@ -1,1 +1,0 @@
-A store with boxes and other items in it.

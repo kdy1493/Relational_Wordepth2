@@ -1,1 +1,0 @@
-A store with boxes and a table in it.

@@ -1,0 +1,11 @@
+# Relational WorDepth: inherits paper config then overrides.
+# Single GPU:  python src/relational_train.py configs/arguments_run_nyu_relational.yaml
+# Multi GPU:   torchrun --nproc_per_node=N src/relational_train.py configs/arguments_run_nyu_relational.yaml --use_ddp
+
+include: arguments_run_nyu_paper.yaml
+model_name: nyu_train_relational
+use_relational_loss: true
+relations_dir_train: ./data/nyu_relational/median_train
+rel_weight: 0.1
+rel_margin: 0.1
+rel_min_pixels: 20

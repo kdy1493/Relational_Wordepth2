@@ -1,1 +1,0 @@
-A book shelf with books in a room.

@@ -1,1 +1,0 @@
-A counter in a restaurant with a table.

@@ -1,1 +1,0 @@
-A store with a box of books in it.

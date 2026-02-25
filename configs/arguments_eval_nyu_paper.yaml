@@ -1,0 +1,17 @@
+# WorDepth NYU eval config (YAML). Eval is single-process.
+# Run:  python src/eval.py configs/arguments_eval_nyu_paper.yaml
+
+checkpoint_path: ./runs/nyu_train_paper/model-7000-best_abs_rel_0.03487
+dataset: nyu
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_test_split.txt
+depth_scale: 6553.5
+input_height: 480
+input_width: 640
+max_depth: 10
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+post_process: true
+gpu_ids: "6"
