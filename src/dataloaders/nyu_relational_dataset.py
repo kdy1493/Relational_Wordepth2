@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms as transforms
 import platform
+import cv2
 
 
 # Global cache for relational annotations (relations.json)
@@ -95,7 +96,9 @@ class NYURelationalDataset(Dataset):
                  use_relational_loss=True,
                  debug_relational=False,
                  depth_in_mm=True,
-                 use_dense_depth=False):
+                 use_dense_depth=False,
+                 cache_images=False,
+                 depth_scale=None):
         """
         Args:
             filenames_file: path to filenames list (optional, if None auto-scans directories)
@@ -107,10 +110,13 @@ class NYURelationalDataset(Dataset):
             depth_in_mm: if True (WorDepth convention), depth file is in mm, load as /1000 -> m.
                          if False (matched), depth file is 0-65535 scale, load as /6553.5 -> m.
             use_dense_depth: if True, load depth from <scene>/dense/sync_depth_dense_XXXXX.png and keep rgb as .jpg.
+            cache_images: if True and is_train, preload all RGB/depth into memory for faster iteration.
+            depth_scale: divisor for raw depth -> m (default 1000 if depth_in_mm else 6553.5).
         """
         self.is_train = is_train
         self.depth_in_mm = depth_in_mm
         self.use_dense_depth = use_dense_depth
+        self.depth_scale = depth_scale if depth_scale is not None else (1000.0 if depth_in_mm else 6553.5)
         # Convert relative paths to absolute paths for Windows compatibility
         self.data_path = os.path.abspath(data_path) if data_path and not os.path.isabs(data_path) else data_path
         self.gt_path = os.path.abspath(gt_path) if gt_path and not os.path.isabs(gt_path) else gt_path
@@ -141,6 +147,91 @@ class NYURelationalDataset(Dataset):
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
         )
+
+        # Image cache (optional): same as paper (dataloader.py DataLoadPreprocess).
+        # Single dict: image_path -> RGB numpy, depth_path -> raw depth numpy (cv2 IMREAD_UNCHANGED).
+        self.image_cache = {}
+        if cache_images and is_train and len(self.filenames) > 0:
+            from tqdm import tqdm
+            for idx in tqdm(range(len(self.filenames)), desc="Loading images"):
+                try:
+                    image_path, depth_path, _ = self._resolve_paths(idx)
+                    if image_path not in self.image_cache:
+                        image_cv = cv2.imread(image_path, cv2.IMREAD_COLOR)
+                        if image_cv is not None:
+                            self.image_cache[image_path] = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
+                    if depth_path not in self.image_cache:
+                        depth_cv = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                        if depth_cv is not None:
+                            self.image_cache[depth_path] = depth_cv
+                except (FileNotFoundError, IndexError):
+                    pass
+            n_pairs = len(self.image_cache) // 2
+            est_gb = len(self.image_cache) * 640 * 480 * 2 / (1024 ** 3)
+            print(f"Cached {n_pairs} image pairs (~{est_gb:.1f} GB)")
+    
+    def _resolve_paths(self, idx):
+        """Resolve (image_path, depth_path, rgb_file) for the given index. Used by cache fill and __getitem__."""
+        sample_path = self.filenames[idx].strip()
+        parts = sample_path.split()
+        rgb_file = parts[0].lstrip('/')
+        depth_file = parts[1].lstrip('/') if len(parts) > 1 else None
+        rgb_file = rgb_file.replace('/', os.sep)
+        if depth_file:
+            depth_file = depth_file.replace('/', os.sep)
+        if self.use_dense_depth:
+            if not rgb_file.endswith('.jpg') and not rgb_file.endswith('.png'):
+                rgb_file = rgb_file + '.jpg'
+            base_name = os.path.basename(rgb_file)
+            num = base_name.replace('rgb_', '').replace('.jpg', '').replace('.png', '') if base_name.startswith('rgb_') else base_name.replace('.jpg', '').replace('.png', '')
+            scene_name = os.path.dirname(rgb_file)
+            depth_file = os.path.join(scene_name, 'dense', f'sync_depth_dense_{num}.png')
+        else:
+            if rgb_file.endswith('.jpg'):
+                rgb_file = rgb_file.replace('.jpg', '.png')
+            elif not rgb_file.endswith('.png'):
+                rgb_file = rgb_file + '.png'
+            if depth_file:
+                if 'sync_depth_' in depth_file:
+                    depth_file = depth_file.replace('sync_depth_', 'depth_')
+                if depth_file.endswith('.jpg'):
+                    depth_file = depth_file.replace('.jpg', '.png')
+                elif not depth_file.endswith('.png'):
+                    depth_file = depth_file + '.png'
+        image_path = os.path.normpath(os.path.join(self.data_path, rgb_file))
+        depth_path = os.path.normpath(os.path.join(self.gt_path, depth_file or rgb_file.replace('rgb_', 'depth_')))
+        if not self.use_dense_depth and not os.path.exists(depth_path) and 'sync_depth_' in depth_path:
+            depth_path_alt = depth_path.replace('sync_depth_', 'depth_')
+            if os.path.exists(depth_path_alt):
+                depth_path = depth_path_alt
+        if not os.path.exists(image_path) and image_path.endswith('.png'):
+            image_path_jpg = image_path.replace('.png', '.jpg')
+            if os.path.exists(image_path_jpg):
+                image_path = image_path_jpg
+        if not os.path.exists(image_path):
+            scene_dir = os.path.dirname(image_path)
+            if os.path.exists(scene_dir):
+                rgb_files = [f for f in os.listdir(scene_dir) if f.startswith('rgb_') and (f.endswith('.png') or f.endswith('.jpg'))]
+                if rgb_files:
+                    image_path = os.path.join(scene_dir, rgb_files[0])
+                    rgb_file = os.path.join(os.path.basename(scene_dir), rgb_files[0]).replace(os.sep, '/')
+                else:
+                    raise FileNotFoundError(f"RGB file not found: {image_path}")
+            else:
+                raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
+        if not os.path.exists(depth_path):
+            scene_dir = os.path.dirname(depth_path)
+            if os.path.exists(scene_dir):
+                depth_files = [f for f in os.listdir(scene_dir) if f.startswith('depth_') and f.endswith('.png')]
+                if depth_files:
+                    rgb_basename = os.path.basename(image_path).replace('rgb_', '').replace('.png', '').replace('.jpg', '')
+                    matching = [f for f in depth_files if rgb_basename in f]
+                    depth_path = os.path.join(scene_dir, matching[0] if matching else depth_files[0])
+                else:
+                    raise FileNotFoundError(f"Depth file not found: {depth_path}")
+            else:
+                raise FileNotFoundError(f"Scene directory not found: {os.path.dirname(depth_path)}")
+        return image_path, depth_path, rgb_file.replace(os.sep, '/')
     
     def _auto_scan_rgb_depth_pairs(self):
         """
@@ -198,118 +289,18 @@ class NYURelationalDataset(Dataset):
     
     def __getitem__(self, idx):
         sample_path = self.filenames[idx].strip()
-        
-        # Parse filename (format: "/scene_name/rgb_XXXXX.jpg /scene_name/sync_depth_XXXXX.png focal")
-        parts = sample_path.split()
-        rgb_file = parts[0]  # e.g., "/kitchen_0028b/rgb_00045.jpg"
-        depth_file = parts[1] if len(parts) > 1 else None  # e.g., "/kitchen_0028b/sync_depth_00045.png"
-        
-        # Remove leading slash if present (filenames_file uses absolute-style paths)
-        rgb_file = rgb_file.lstrip('/')
-        if depth_file:
-            depth_file = depth_file.lstrip('/')
-        
-        # Normalize path separators for Windows compatibility
-        rgb_file = rgb_file.replace('/', os.sep)
-        if depth_file:
-            depth_file = depth_file.replace('/', os.sep)
+        image_path, depth_path, rgb_file = self._resolve_paths(idx)
 
-        # When use_dense_depth: keep rgb as .jpg, depth from dense/sync_depth_dense_XXXXX.png
-        if self.use_dense_depth:
-            # Keep extension from split for rgb (e.g. .jpg)
-            if not rgb_file.endswith('.jpg') and not rgb_file.endswith('.png'):
-                rgb_file = rgb_file + '.jpg'
-            # depth: scene/dense/sync_depth_dense_XXXXX.png (extract number from rgb_00045)
-            base_name = os.path.basename(rgb_file)
-            if base_name.startswith('rgb_'):
-                num = base_name.replace('rgb_', '').replace('.jpg', '').replace('.png', '')
-            else:
-                num = base_name.replace('.jpg', '').replace('.png', '')
-            scene_name = os.path.dirname(rgb_file)
-            depth_file = os.path.join(scene_name, 'dense', f'sync_depth_dense_{num}.png')
+        # Load image and depth from cache or disk (cache read identical to paper DataLoadPreprocess)
+        if image_path in self.image_cache and depth_path in self.image_cache:
+            image = Image.fromarray(self.image_cache[image_path])  # paper: RGB stored in cache
+            depth_gt = Image.fromarray(self.image_cache[depth_path])  # paper: raw in cache
+            depth_gt = np.array(depth_gt, dtype=np.float32) / self.depth_scale
+            depth_gt = np.expand_dims(depth_gt, axis=0)  # (1, H, W)
         else:
-            # Original: rgb as .png, depth from sync_depth_ or depth_
-            if rgb_file.endswith('.jpg'):
-                rgb_file = rgb_file.replace('.jpg', '.png')
-            elif not rgb_file.endswith('.png'):
-                rgb_file = rgb_file + '.png'
-            if depth_file:
-                if 'sync_depth_' in depth_file:
-                    depth_file = depth_file.replace('sync_depth_', 'depth_')
-                if depth_file.endswith('.jpg'):
-                    depth_file = depth_file.replace('.jpg', '.png')
-                elif not depth_file.endswith('.png'):
-                    depth_file = depth_file + '.png'
-
-        # Full paths
-        image_path = os.path.join(self.data_path, rgb_file)
-        if depth_file:
-            depth_path = os.path.join(self.gt_path, depth_file)
-        else:
-            depth_path = os.path.join(self.gt_path, rgb_file.replace('rgb_', 'depth_'))
-        
-        # Normalize paths (resolve ./, .., etc.)
-        image_path = os.path.normpath(image_path)
-        depth_path = os.path.normpath(depth_path)
-        
-        # Try different depth file names if the original doesn't exist (skip when use_dense_depth)
-        if not self.use_dense_depth and not os.path.exists(depth_path):
-            if 'sync_depth_' in depth_path:
-                depth_path_alt = depth_path.replace('sync_depth_', 'depth_')
-                if os.path.exists(depth_path_alt):
-                    depth_path = depth_path_alt
-
-        # Check if rgb exists; try .jpg if .png missing (for use_dense_depth data)
-        if not os.path.exists(image_path) and image_path.endswith('.png'):
-            image_path_jpg = image_path.replace('.png', '.jpg')
-            if os.path.exists(image_path_jpg):
-                image_path = image_path_jpg
-
-        # Check if files exist, if not, try to find closest match or raise clear error
-        if not os.path.exists(image_path):
-            scene_dir = os.path.dirname(image_path)
-            if os.path.exists(scene_dir):
-                rgb_files = [f for f in os.listdir(scene_dir) if f.startswith('rgb_') and (f.endswith('.png') or f.endswith('.jpg'))]
-                if rgb_files:
-                    # Use first available file as fallback (for debugging)
-                    print(f"Warning: {os.path.basename(image_path)} not found in {scene_dir}, using {rgb_files[0]} instead")
-                    image_path = os.path.join(scene_dir, rgb_files[0])
-                    # Update rgb_file for text feature path
-                    rgb_file = os.path.join(os.path.basename(scene_dir), rgb_files[0]).replace(os.sep, '/')
-                else:
-                    raise FileNotFoundError(f"RGB file not found: {image_path} (and no rgb_*.png files in {scene_dir})")
-            else:
-                raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
-        
-        if not os.path.exists(depth_path):
-            scene_dir = os.path.dirname(depth_path)
-            if os.path.exists(scene_dir):
-                depth_files = [f for f in os.listdir(scene_dir) if f.startswith('depth_') and f.endswith('.png')]
-                if depth_files:
-                    # Match by number if possible
-                    rgb_basename = os.path.basename(image_path).replace('rgb_', '').replace('.png', '').replace('.jpg', '')
-                    matching_depth = [f for f in depth_files if rgb_basename in f]
-                    if matching_depth:
-                        depth_path = os.path.join(scene_dir, matching_depth[0])
-                    else:
-                        print(f"Warning: {os.path.basename(depth_path)} not found, using {depth_files[0]} instead")
-                        depth_path = os.path.join(scene_dir, depth_files[0])
-                else:
-                    raise FileNotFoundError(f"Depth file not found: {depth_path} (and no depth_*.png files in {scene_dir})")
-            else:
-                raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
-        
-        # Load image
-        image = Image.open(image_path).convert('RGB')
-        
-        # Load depth. WorDepth: NYU file in mm, /1000 -> m. Matched: 0-65535 scale, /6553.5 -> m.
-        depth_gt = Image.open(depth_path)
-        depth_gt = np.array(depth_gt, dtype=np.float32)
-        if self.depth_in_mm:
-            depth_gt = depth_gt / 1000.0  # mm -> m (WorDepth NYU)
-        else:
-            depth_gt = depth_gt / 6553.5  # matched 16-bit (0-65535) -> 0-10m
-        depth_gt = np.expand_dims(depth_gt, axis=0)  # (1, H, W)
+            image = Image.open(image_path).convert('RGB')
+            depth_gt = np.array(Image.open(depth_path), dtype=np.float32) / self.depth_scale
+            depth_gt = np.expand_dims(depth_gt, axis=0)  # (1, H, W)
         
         # Resize if needed
         if image.size != (self.input_width, self.input_height):
@@ -562,7 +553,9 @@ def create_nyu_relational_dataloader(args, mode='train', train_sampler=None, use
         use_relational_loss=use_relational_loss,
         depth_in_mm=depth_in_mm,
         use_dense_depth=use_dense_depth,
-        debug_relational=getattr(args, 'debug_relational', False)
+        debug_relational=getattr(args, 'debug_relational', False),
+        cache_images=getattr(args, 'cache_images', False),
+        depth_scale=getattr(args, 'depth_scale', 6553.5),
     )
     
     # Create dataloader

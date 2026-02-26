@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.venv_bw/
 
 # Editor / IDE
 .vscode/
@@ -40,3 +41,6 @@ checkpoints/
 # Cursor terminals
 *.log
 terminals/
+
+# External toolboxes (can be recloned)
+adabins/

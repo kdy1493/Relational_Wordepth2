@@ -1,224 +1,181 @@
-"""
-relational_depth_loss.py
-Relational Depth Supervision Loss for WorDepth
+"""relational_depth_loss.py 
 
-Enforces depth ordering constraints based on object relations:
-- 'front': subject is closer than object (depth_subject < depth_object)
-- 'behind': subject is farther than object (depth_subject > depth_object)
+Relational depth supervision loss for object-level ordering constraints.
+
+Key behaviors (intentionally enforced):
+- Representative object depth mode: ONLY 'median' or 'statistical' (mean is disabled)
+- Valid depth gating: valid_min_depth < depth < valid_max_depth
+- Object gating: min_valid_pixels on (mask ∧ valid_depth); relations touching invalid objects are dropped
+- Relation normalization: 'behind' is converted to 'front' by swapping subject/object
+
+This file is a cleaned-up version:
+- no legacy unused helpers
+- no duplicated docstrings
 """
+
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class RelationalDepthLoss(nn.Module):
-    """
-    Relational depth supervision loss.
+    def __init__(
+        self,
+        margin_rank: float = 0.1,
+        min_pixels: int = 20,
+        min_valid_pixels: int | None = None,
+        repr_mode: str = "median",
+        valid_min_depth: float = 0.1,
+        valid_max_depth: float = 10.0,
+        statistical_alpha: float = 1.0,
+        debug_relational: bool = False,
+    ):
+        """Relational loss enforcing object depth ordering.
 
-    Input format (matching the four-pipeline architecture):
-        depth_pred:      (B, 1, H, W) - predicted depth map
-        masks_batch:     list of length B, each item is Tensor(N_i, H_mask, W_mask)
-        relations_batch: list of length B, each item is list of dict:
-            {
-                'subject_idx': int,
-                'object_idx':  int,
-                'relation':    'front' | 'behind',
-                'confidence':  float (optional, default 1.0)
-            }
-
-    Purpose:
-        - 'front':  depth(subject) < depth(object)
-        - 'behind': depth(subject) > depth(object)
-    """
-
-    def __init__(self,
-                 margin_rank=0.1,
-                 min_pixels=20,
-                 use_median=False,
-                 debug_relational=False):
-        """
         Args:
-            margin_rank: margin for front/behind relations (meters)
-            min_pixels:  minimum pixels in mask to consider object (ignore too small objects)
-            use_median:  if True, use median depth; if False, use mean depth
-            debug_relational: if True, enable debug prints
+            margin_rank: hinge margin for ordering constraint (same units as depth_pred).
+            min_pixels: legacy fallback if min_valid_pixels is None.
+            min_valid_pixels: minimum count of valid pixels (mask ∧ valid_depth) per object.
+            repr_mode: 'median' or 'statistical'.
+                      - median: representative = median(depth in mask ∧ valid)
+                      - statistical: representative = mean + alpha * std
+            valid_min_depth / valid_max_depth: valid depth range used when computing representative depth.
+            statistical_alpha: alpha for statistical representative.
+            debug_relational: print some debug info (kept minimal).
         """
         super().__init__()
-        self.margin_rank = margin_rank
-        self.min_pixels = min_pixels
-        self.use_median = use_median
+        self.margin_rank = float(margin_rank)
+        self.min_pixels = int(min_pixels)
+        self.min_valid_pixels = min_valid_pixels
+        self.repr_mode = str(repr_mode).lower()
+        if self.repr_mode not in {"median", "statistical"}:
+            raise ValueError("repr_mode must be 'median' or 'statistical' (mean intentionally disabled).")
+
+        self.valid_min_depth = float(valid_min_depth)
+        self.valid_max_depth = float(valid_max_depth)
+        self.statistical_alpha = float(statistical_alpha)
         self.relu = nn.ReLU()
-        self.debug_relational = debug_relational
-
-    def compute_object_depth(self, depth_map, mask):
-        """
-        Compute representative depth for an object region.
-        
-        Args:
-            depth_map: (H, W) float tensor
-            mask:      (H, W) float tensor (will be binarized at 0.5)
-        
-        Returns:
-            avg_depth: scalar tensor or None if mask too small
-        """
-        # Move mask to same device as depth_map and apply binary threshold
-        mask = (mask > 0.5).float().to(depth_map.device)
-        num_pixels = mask.sum()
-
-        if num_pixels.item() < self.min_pixels:
-            return None
-
-        # Extract depths in masked region
-        masked_depth = depth_map * mask
-        valid_depths = masked_depth[mask > 0.5]  # (num_pixels,)
-        
-        if valid_depths.numel() == 0:
-            return None
-        
-        # Compute representative depth
-        if self.use_median:
-            # Median is more robust to outliers
-            avg_depth = torch.median(valid_depths)
-        else:
-            # Mean is simpler and differentiable
-            avg_depth = valid_depths.mean()
-        
-        return avg_depth
+        self.debug_relational = bool(debug_relational)
 
     def forward(self, depth_pred, masks_batch, relations_batch):
-        """
-        Optimized: Compute relational depth loss with full vectorization (no for-loop over relations).
+        """Compute relational depth loss.
+
         Args:
-            depth_pred:      (B, 1, H, W) predicted depth
-            masks_batch:     list of length B, each Tensor(N_i, H, W)
-            relations_batch: list of length B, each list[dict]
-        Returns:
-            loss: scalar tensor (0 if no valid relations)
+            depth_pred: (B,1,H,W)
+            masks_batch: list length B; each Tensor (N_i,Hm,Wm)
+            relations_batch: list length B; each list[dict]
         """
-        import torch.nn.functional as F
         device = depth_pred.device
+        dtype = depth_pred.dtype
         B, _, H_d, W_d = depth_pred.shape
 
-        total_loss = torch.tensor(0.0, device=device, dtype=depth_pred.dtype)
+        total_loss = depth_pred.new_tensor(0.0)
         valid_rel_count = 0
 
-        for b in range(B):
-            cur_depth = depth_pred[b, 0]             # (H_d, W_d)
-            cur_masks = masks_batch[b]              # Tensor(N_i, H_m, W_m)
-            cur_rels  = relations_batch[b]          # list[dict]
+        # min_valid fallback
+        min_valid = self.min_valid_pixels
+        if min_valid is None:
+            min_valid = self.min_pixels
+        min_valid = int(min_valid)
 
-            # Skip if no masks or relations
-            if cur_masks is None or cur_masks.numel() == 0 or len(cur_rels) == 0:
+        for b in range(B):
+            cur_depth = depth_pred[b, 0]  # (H,W)
+            cur_masks = masks_batch[b]
+            cur_rels = relations_batch[b]
+
+            if cur_masks is None or cur_rels is None or len(cur_rels) == 0:
                 continue
 
-            # Resize masks to match depth resolution
+            if not torch.is_tensor(cur_masks):
+                cur_masks = torch.as_tensor(cur_masks)
+            if cur_masks.dim() == 2:
+                cur_masks = cur_masks.unsqueeze(0)
 
-            if cur_masks.shape[-2:] != (H_d, W_d):
+            # Resize masks to depth resolution if needed
+            if tuple(cur_masks.shape[-2:]) != (H_d, W_d):
                 cur_masks = F.interpolate(
-                    cur_masks.unsqueeze(1).float(),   # (N, 1, H_m, W_m)
+                    cur_masks.unsqueeze(1).float(),
                     size=(H_d, W_d),
-                    mode='nearest'
-                ).squeeze(1)                           # (N, H_d, W_d)
-            else:
-                cur_masks = cur_masks.float()
-
-            # 항상 cur_depth와 동일한 디바이스로 이동
-            cur_masks = cur_masks.to(cur_depth.device)
+                    mode="nearest",
+                ).squeeze(1)
+            cur_masks = cur_masks.to(device=device).float()
 
             N_obj = cur_masks.shape[0]
-            # 1. 객체별 대표 깊이 (mean)
-            mask_sum = cur_masks.sum(dim=(1,2)) + 1e-8  # (N_obj,)
-            obj_depths = (cur_depth * cur_masks).sum(dim=(1,2)) / mask_sum  # (N_obj,)
 
-            # 2. 관계 정보 벡터화
+            # Valid depth mask
+            valid_depth = (cur_depth > self.valid_min_depth) & (cur_depth < self.valid_max_depth)
+
+            # Compute representative depth per object
+            obj_depths = torch.empty((N_obj,), device=device, dtype=dtype)
+            obj_valid = torch.zeros((N_obj,), device=device, dtype=torch.bool)
+
+            for k in range(N_obj):
+                mk = cur_masks[k] > 0.5
+                mk_valid = mk & valid_depth
+                cnt = int(mk_valid.sum().item())
+                if cnt < min_valid:
+                    obj_depths[k] = torch.nan
+                    continue
+
+                vals = cur_depth[mk_valid].to(dtype)
+
+                if self.repr_mode == "median":
+                    obj_depths[k] = vals.median()
+                else:  # statistical
+                    mu = vals.mean()
+                    sigma = vals.std(unbiased=False)
+                    obj_depths[k] = mu + self.statistical_alpha * sigma
+
+                obj_valid[k] = True
+
+            # Normalize relations: behind -> swap to front
             rels = []
             for rel in cur_rels:
-                rel_type = rel.get('relation', 'front').lower()
-                if rel_type not in {'front', 'behind'}:
+                rel_type = str(rel.get("relation", "front")).lower()
+                if rel_type not in {"front", "behind"}:
                     continue
-                # 'behind'는 subject/object swap
-                if rel_type == 'behind':
-                    rel = rel.copy()
-                    rel['subject_idx'], rel['object_idx'] = rel['object_idx'], rel['subject_idx']
-                    rel['relation'] = 'front'
-                rels.append(rel)
+                s_idx = int(rel.get("subject_idx"))
+                o_idx = int(rel.get("object_idx"))
+                if rel_type == "behind":
+                    s_idx, o_idx = o_idx, s_idx
+                if s_idx < 0 or s_idx >= N_obj or o_idx < 0 or o_idx >= N_obj:
+                    continue
+                if (not obj_valid[s_idx]) or (not obj_valid[o_idx]):
+                    continue
+                conf = float(rel.get("confidence", 1.0))
+                rels.append((s_idx, o_idx, conf))
+
             if len(rels) == 0:
                 continue
 
-            idx_A = torch.tensor([r['subject_idx'] for r in rels], device=device, dtype=torch.long)
-            idx_B = torch.tensor([r['object_idx'] for r in rels], device=device, dtype=torch.long)
-            confidence = torch.tensor([float(r.get('confidence', 1.0)) for r in rels], device=device, dtype=depth_pred.dtype)
+            idx_A = torch.tensor([r[0] for r in rels], device=device, dtype=torch.long)
+            idx_B = torch.tensor([r[1] for r in rels], device=device, dtype=torch.long)
+            confidence = torch.tensor([r[2] for r in rels], device=device, dtype=dtype)
 
-            # 3. 관계별 d_A, d_B
-            d_A = obj_depths[idx_A]  # (n_rel,)
-            d_B = obj_depths[idx_B]  # (n_rel,)
+            d_A = obj_depths[idx_A]
+            d_B = obj_depths[idx_B]
 
-            # 4. margin (front/behind 동일)
-            margin = self.margin_rank
-            coeff = 1.0
+            finite = torch.isfinite(d_A) & torch.isfinite(d_B)
+            if not finite.any():
+                continue
 
-            # 5. violation 및 loss
-            violation = self.relu(d_A - d_B + margin)
-            loss_vec = coeff * confidence * violation
+            d_A = d_A[finite]
+            d_B = d_B[finite]
+            confidence = confidence[finite]
+
+            violation = self.relu(d_A - d_B + self.margin_rank)
+            loss_vec = confidence * violation
+
             total_loss = total_loss + loss_vec.sum()
-            valid_rel_count += loss_vec.numel()
+            valid_rel_count += int(loss_vec.numel())
+
+            if self.debug_relational and b == 0:
+                # Minimal debug sample
+                print(f"[RelLoss] b={b} objs={N_obj} valid_objs={int(obj_valid.sum())} rels={len(rels)}")
 
         if valid_rel_count == 0:
             return depth_pred.new_tensor(0.0)
         return total_loss / valid_rel_count
 
-
-class CombinedDepthLoss(nn.Module):
-    """
-    Combines SILog loss with Relational loss.
-    
-    Useful wrapper for easy integration into existing training code.
-    """
-    
-    def __init__(self, 
-                 si_loss_fn,
-                 relational_loss_fn,
-                 weight_relational=0.1):
-        """
-        Args:
-            si_loss_fn: SILogLoss instance
-            relational_loss_fn: RelationalDepthLoss instance
-            weight_relational: weight for relational loss term
-        """
-        super().__init__()
-        self.si_loss = si_loss_fn
-        self.relational_loss = relational_loss_fn
-        self.weight_relational = weight_relational
-    
-    def forward(self, depth_pred, depth_gt, masks=None, relations=None):
-        """
-        Args:
-            depth_pred: (B, 1, H, W)
-            depth_gt:   (B, 1, H, W)
-            masks:      list[Tensor] or None
-            relations:  list[list[dict]] or None
-        
-        Returns:
-            total_loss: combined loss
-            loss_dict:  dict with individual loss components
-        """
-        # Standard depth loss
-        si_loss = self.si_loss(depth_pred, depth_gt)
-        
-        # Relational loss (only if masks and relations provided)
-        if masks is not None and relations is not None:
-            rel_loss = self.relational_loss(depth_pred, masks, relations)
-        else:
-            rel_loss = torch.tensor(0.0, device=depth_pred.device)
-        
-        # Combined loss
-        total_loss = si_loss + self.weight_relational * rel_loss
-        
-        # Return breakdown for logging
-        loss_dict = {
-            'si_loss': si_loss.item(),
-            'relational_loss': rel_loss.item() if isinstance(rel_loss, torch.Tensor) else 0.0,
-            'total_loss': total_loss.item()
-        }
-        
-        return total_loss, loss_dict

@@ -9,6 +9,10 @@ Usage (multi-GPU, DDP example):
   torchrun --nproc_per_node=4 src/relational_train.py @configs/arguments_run_nyu_paper.txt \
     --use_ddp --use_relational_loss \
     --relations_dir_train ./data/nyu_relational/median_train
+
+      CUDA_VISIBLE_DEVICES=0,1 \
+  torchrun --nproc_per_node=2 --master_port=29501 \
+    src/relational_train.py configs/arguments_run_nyu_relational.yaml --use_ddp
 """
 
 import argparse
@@ -140,6 +144,11 @@ def _make_parser() -> argparse.ArgumentParser:
         help="DDP; launch with: torchrun --nproc_per_node=N src/relational_train.py @config --use_ddp",
     )
     parser.add_argument("--cache_images", action="store_true")
+    parser.add_argument(
+        "--use_dense_depth",
+        action="store_true",
+        help="Use dense/sync_depth_dense_XXXXX.png depth files for NYU (matches train split paths).",
+    )
 
     # EMA
     parser.add_argument("--use_ema", action="store_true", help="exponential moving average of parameters")
@@ -205,7 +214,38 @@ def _make_parser() -> argparse.ArgumentParser:
         "--rel_min_pixels",
         type=int,
         default=20,
-        help="minimum mask pixels to consider an object in RelationalDepthLoss",
+        help="minimum mask pixels to consider an object in RelationalDepthLoss (legacy; prefer --rel_min_valid_pixels)",
+    )
+    parser.add_argument(
+        "--rel_min_valid_pixels",
+        type=int,
+        default=None,
+        help="minimum valid pixels (mask ∧ valid-depth) per object; if None, falls back to --rel_min_pixels",
+    )
+    parser.add_argument(
+        "--rel_repr",
+        type=str,
+        default="median",
+        choices=["median", "statistical"],
+        help="object representative depth for relational loss: median | statistical (mean+alpha*std)",
+    )
+    parser.add_argument(
+        "--rel_valid_min_depth",
+        type=float,
+        default=0.1,
+        help="minimum valid depth used when computing object representative depth for relational loss",
+    )
+    parser.add_argument(
+        "--rel_valid_max_depth",
+        type=float,
+        default=10.0,
+        help="maximum valid depth used when computing object representative depth for relational loss",
+    )
+    parser.add_argument(
+        "--rel_statistical_alpha",
+        type=float,
+        default=1.0,
+        help="for --rel_repr statistical: representative = mean + alpha * std",
     )
     parser.add_argument(
         "--debug_relational",
@@ -416,7 +456,11 @@ def main_worker(args: argparse.Namespace) -> None:
         rel_loss_fn = RelationalDepthLoss(
             margin_rank=args.rel_margin,
             min_pixels=args.rel_min_pixels,
-            use_median=False,
+            min_valid_pixels=getattr(args, "rel_min_valid_pixels", None),
+            repr_mode=getattr(args, "rel_repr", "median"),
+            valid_min_depth=getattr(args, "rel_valid_min_depth", 0.1),
+            valid_max_depth=getattr(args, "rel_valid_max_depth", 10.0),
+            statistical_alpha=getattr(args, "rel_statistical_alpha", 1.0),
             debug_relational=getattr(args, "debug_relational", False),
         )
 
@@ -544,6 +588,9 @@ def main_worker(args: argparse.Namespace) -> None:
 
             if use_amp and scaler is not None:
                 with autocast():
+                    # NOTE: base_loss is returned by the WorDepth model forward().
+                    # It typically includes the main depth regression objective (e.g., SILog)
+                    # and may include additional regularizers (e.g., KLD/variance terms) depending on config.
                     depth_pred, base_loss = model(image, text_feature_list, depth_gt)
                     if rel_loss_fn is not None and masks_batch is not None and relations_batch is not None:
                         rel_loss = rel_loss_fn(depth_pred, masks_batch, relations_batch)

@@ -1,6 +1,8 @@
 # WorDepth NYU paper training config (YAML).
 # Single GPU:  python src/train.py configs/arguments_run_nyu_paper.yaml
-# Multi GPU:    torchrun --nproc_per_node=N src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp
+# Multi GPU:    torchrun --nproc_per_node=3 src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp
+# Tmux: tmux new -s train → source .venv/bin/activate → then (log in runs/ so run dir is not created in advance):
+#   torchrun --nproc_per_node=3 src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_paper_v2_$(date +%Y%m%d_%H%M).log
 
 mode: train
 model_name: nyu_train_paper_v2
