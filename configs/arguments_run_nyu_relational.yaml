@@ -1,17 +1,29 @@
-# Relational WorDepth NYU — standalone config (no include).
-# Single GPU:  python src/relational_train.py configs/arguments_run_nyu_relational.yaml
-# Multi GPU:    torchrun --nproc_per_node=N src/relational_train.py configs/arguments_run_nyu_relational.yaml --use_ddp
-# Tmux: tmux new -s train → source .venv/bin/activate → then (log in runs/ so run dir is not created in advance):
+# Relational WorDepth NYU — Base relational config (standalone)
+# - 목적: WorDepth에 relational loss를 추가한 기본 설정 (Exp0/Exp1/Exp2/Exp3의 공통 베이스)
+# - 사용 데이터: NYU Depth v2 (train/val/test split, dense depth)
+#
+# 실행 예시 (repo root 기준):
+#   # 단일 GPU
+#   python src/relational_train.py configs/arguments_run_nyu_relational.yaml
+#   # 다중 GPU (DDP)
+#   torchrun --nproc_per_node=2 src/relational_train.py configs/arguments_run_nyu_relational.yaml --use_ddp
+#   # Tmux:
 #   torchrun --nproc_per_node=1 src/relational_train.py configs/arguments_run_nyu_relational.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_relational_$(date +%Y%m%d_%H%M).log
 
+
+# config
 mode: train
 model_name: nyu_train_relational
-pretrain: ./swin_large_patch4_window12_384_22k.pth
 dataset: nyu
 data_path: ./data/nyu_v2_sync
 gt_path: ./data/nyu_v2_sync
 filenames_file: ./data_splits/nyudepthv2_train_split.txt
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+
+
+# hyperparameters
 depth_scale: 6553.5
+max_depth: 10
 batch_size: 12
 num_epochs: 50
 accumulation_steps: 8
@@ -23,34 +35,42 @@ adam_eps: 1e-6
 num_threads: 16
 input_height: 480
 input_width: 640
-max_depth: 10
 do_random_rotate: true
 degree: 2.5
-log_directory: ./runs/
 
+
+# logging / validation
+log_directory: ./runs/
 log_freq: 50
 min_depth_eval: 1e-3
 max_depth_eval: 10
 eigen_crop: true
-
 do_online_eval: true
+eval_freq: 3000
 data_path_eval: ./data/nyu_v2_sync
 gt_path_eval: ./data/nyu_v2_sync
 filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
 filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
-eval_freq: 3000
 
+
+# WorDepth 내부 설정
 weight_kld: 1e-3
 alter_prob: 0.01
 
+
+# 실행환경
 use_amp: true
 cache_images: false
 gpu_ids: "1"
 
-# Relational
+store_freq_epochs: 2.0
+
+
+# Relational (base)
 use_relational_loss: true
 use_dense_depth: true
 relations_dir_train: ./data/nyu_relational/median_train
 rel_weight: 0.1
 rel_margin: 0.1
 rel_min_pixels: 20
+

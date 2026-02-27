@@ -5,7 +5,7 @@
 #   torchrun --nproc_per_node=3 src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_paper_v2_$(date +%Y%m%d_%H%M).log
 
 mode: train
-model_name: nyu_train_paper_v2
+model_name: nyu_train_paper
 pretrain: ./swin_large_patch4_window12_384_22k.pth
 dataset: nyu
 data_path: ./data/nyu_v2_sync
@@ -46,3 +46,5 @@ alter_prob: 0.01
 use_amp: true
 cache_images: true
 gpu_ids: "4,5,6"
+
+store_freq_epochs: 2.0

@@ -174,7 +174,20 @@ def _make_parser() -> argparse.ArgumentParser:
         default=3000,
         help="periodic checkpoint save every N steps (0=disable); enables resume from checkpoint",
     )
+    parser.add_argument(
+        "--store_freq_epochs",
+        type=float,
+        default=0.0,
+        help="periodic checkpoint save every N epochs (overrides --store_freq when > 0)",
+    )
     parser.add_argument("--legacy", action="store_true", help="keep skip connection in UNet")
+
+    # Baseline mode (image-only, no text features from disk)
+    parser.add_argument(
+        "--baseline_mode",
+        action="store_true",
+        help="image-only baseline: do not load text features; feed zero text embeddings",
+    )
 
     return parser
 
@@ -418,7 +431,14 @@ def main_worker(args: argparse.Namespace) -> None:
     torch.backends.cudnn.benchmark = True
 
     # Data
-    text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
+    baseline_mode = getattr(args, "baseline_mode", False)
+    text_feat_cache: Optional[Dict[str, torch.Tensor]]
+    if baseline_mode:
+        text_feat_cache = None
+        if is_main:
+            logger.info("Baseline mode enabled: skipping text feature preload (using zero text embeddings).")
+    else:
+        text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
     dataloader = NewDataLoader(args, "train")
     dataloader_eval = None
     if getattr(args, "do_online_eval", False) and getattr(args, "filenames_file_eval", None) and os.path.isfile(args.filenames_file_eval):
@@ -447,6 +467,14 @@ def main_worker(args: argparse.Namespace) -> None:
     epoch = global_step // steps_per_epoch
     save_best_only_idx = getattr(args, "save_best_metric_only", -1)
 
+    # Store frequency in steps (allow overriding by epochs via store_freq_epochs, if provided)
+    store_freq_steps = getattr(args, "store_freq", 0)
+    store_freq_epochs = float(getattr(args, "store_freq_epochs", 0.0)) if hasattr(args, "store_freq_epochs") else 0.0
+    if store_freq_epochs > 0 and steps_per_epoch > 0:
+        store_freq_steps = int(store_freq_epochs * steps_per_epoch // accumulation_steps)
+        if is_main:
+            logger.info("store_freq_epochs=%.2f -> store_freq=%d steps", store_freq_epochs, store_freq_steps)
+
     # ---------- Training loop ----------
     while epoch < args.num_epochs:
         if use_ddp and getattr(dataloader, "train_sampler", None) is not None:
@@ -460,18 +488,34 @@ def main_worker(args: argparse.Namespace) -> None:
 
             image = sample_batched["image"].cuda(non_blocking=True)
             depth_gt = sample_batched["depth"].cuda(non_blocking=True)
-            text_list = []
-            for i in range(len(sample_batched["sample_path"])):
-                rgb_key = sample_batched["sample_path"][i].split(" ")[0][:-4]
-                if rgb_key in text_feat_cache:
-                    text_list.append(text_feat_cache[rgb_key].to(image.device))
-                else:
-                    text_feat_dir = os.path.join(_REPO_ROOT, "data", "text_feat", "nyu" if args.dataset == "nyu" else "kitti", "train")
-                    pt_path = _text_feat_pt_path(text_feat_dir, rgb_key)
-                    if pt_path is None:
-                        raise FileNotFoundError(f"Text feature not found for {rgb_key} under {text_feat_dir}")
-                    text_list.append(torch.load(pt_path, map_location=image.device))
-            text_feature_list = torch.cat(text_list, dim=0)
+
+            # Text features
+            if baseline_mode:
+                # Image-only baseline: feed zero text embeddings (no disk I/O, no language signal)
+                batch_size = image.size(0)
+                text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+            else:
+                text_list = []
+                for i in range(len(sample_batched["sample_path"])):
+                    rgb_key = sample_batched["sample_path"][i].split(" ")[0][:-4]
+                    if text_feat_cache is not None and rgb_key in text_feat_cache:
+                        text_list.append(text_feat_cache[rgb_key].to(image.device))
+                    else:
+                        text_feat_dir = os.path.join(
+                            _REPO_ROOT,
+                            "data",
+                            "text_feat",
+                            "nyu" if args.dataset == "nyu" else "kitti",
+                            "train",
+                        )
+                        pt_path = _text_feat_pt_path(text_feat_dir, rgb_key)
+                        if pt_path is None:
+                            raise FileNotFoundError(f"Text feature not found for {rgb_key} under {text_feat_dir}")
+                        feat = torch.load(pt_path, map_location=image.device)
+                        if text_feat_cache is not None:
+                            text_feat_cache[rgb_key] = feat.cpu()
+                        text_list.append(feat.to(image.device))
+                text_feature_list = torch.cat(text_list, dim=0)
 
             if use_amp and scaler is not None:
                 with autocast():
@@ -512,7 +556,7 @@ def main_worker(args: argparse.Namespace) -> None:
                     logger.info("epoch=%d step=%d loss=%.4f", epoch, global_step, loss.item())
 
                 # Periodic checkpoint (for resume: model, step, and EMA if used)
-                if is_main and args.store_freq > 0 and global_step % args.store_freq == 0:
+                if is_main and store_freq_steps > 0 and global_step % store_freq_steps == 0:
                     periodic_ckpt = {"global_step": global_step, "model": model.state_dict()}
                     if ema is not None:
                         periodic_ckpt["ema"] = ema.state_dict()

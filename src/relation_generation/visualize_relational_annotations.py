@@ -6,13 +6,13 @@
 명령어 (repo root에서, 한 줄로 복사해서 실행):
 
   # 4패널 (GT depth 포함) median style , statistical style 바꿔서 하면 됨
-  python src/relation_generation/visualize_annotations.py --out_dir ./data/nyu_relational/median_train --image_dir ./data/nyu_v2_sync/train --depth_dir ./data/nyu_v2_sync --vis_dir ./data/nyu_relational/anno_median_vis --num_samples 5
+  python src/relation_generation/visualize_relational_annotations.py --out_dir ./data/nyu_relational/median_train --image_dir ./data/nyu_v2_sync/train --depth_dir ./data/nyu_v2_sync --vis_dir ./data/nyu_relational/anno_median_vis --num_samples 5
 
   # 특정 scene만
-  python src/relation_generation/visualize_annotations.py --out_dir ./data/nyu_relational/statistical_train/basement_0001a --image_dir ./data/nyu_v2_sync/train --depth_dir ./data/nyu_v2_sync --vis_dir ./data/nyu_relational/vis --num_samples 5
+  python src/relation_generation/visualize_relational_annotations.py --out_dir ./data/nyu_relational/statistical_train/basement_0001a --image_dir ./data/nyu_v2_sync/train --depth_dir ./data/nyu_v2_sync --vis_dir ./data/nyu_relational/vis --num_samples 5
 
   # 3패널 (depth 없음)
-  python src/relation_generation/visualize_annotations.py --out_dir ./data/nyu_relational/statistical_train --image_dir ./data/nyu_v2_sync/train --vis_dir ./data/nyu_relational/vis --num_samples 5
+  python src/relation_generation/visualize_relational_annotations.py --out_dir ./data/nyu_relational/statistical_train --image_dir ./data/nyu_v2_sync/train --vis_dir ./data/nyu_relational/vis --num_samples 5
 """
 import os
 import glob

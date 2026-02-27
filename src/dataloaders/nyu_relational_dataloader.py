@@ -222,11 +222,22 @@ class NYURelationalDataset(Dataset):
         if not os.path.exists(depth_path):
             scene_dir = os.path.dirname(depth_path)
             if os.path.exists(scene_dir):
-                depth_files = [f for f in os.listdir(scene_dir) if f.startswith('depth_') and f.endswith('.png')]
+                # Support multiple NYU depth naming conventions:
+                # - depth_XXXXX.png
+                # - sync_depth_XXXXX.png
+                # - sync_depth_dense_XXXXX.png (converted dense depth)
+                candidates = []
+                for fname in os.listdir(scene_dir):
+                    if not fname.endswith(".png"):
+                        continue
+                    if fname.startswith("depth_") or fname.startswith("sync_depth_"):
+                        candidates.append(fname)
+                depth_files = sorted(candidates)
                 if depth_files:
-                    rgb_basename = os.path.basename(image_path).replace('rgb_', '').replace('.png', '').replace('.jpg', '')
+                    rgb_basename = os.path.basename(image_path).replace("rgb_", "").replace(".png", "").replace(".jpg", "")
                     matching = [f for f in depth_files if rgb_basename in f]
-                    depth_path = os.path.join(scene_dir, matching[0] if matching else depth_files[0])
+                    chosen = matching[0] if matching else depth_files[0]
+                    depth_path = os.path.join(scene_dir, chosen)
                 else:
                     raise FileNotFoundError(f"Depth file not found: {depth_path}")
             else:
