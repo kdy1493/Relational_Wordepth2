@@ -181,7 +181,12 @@ def _make_parser() -> argparse.ArgumentParser:
     # WorDepth
     parser.add_argument("--weight_kld", type=float, default=1e-3)
     parser.add_argument("--alter_prob", type=float, default=0.5)
-    parser.add_argument("--store_freq", type=int, default=0)
+    parser.add_argument(
+        "--store_freq",
+        type=int,
+        default=3000,
+        help="periodic checkpoint save every N steps (0=disable); enables resume from checkpoint",
+    )
     parser.add_argument("--legacy", action="store_true", help="keep skip connection in UNet")
 
     # Relational supervision
@@ -555,6 +560,11 @@ def main_worker(args: argparse.Namespace) -> None:
     epoch = global_step // steps_per_epoch
     save_best_only_idx = getattr(args, "save_best_metric_only", -1)
 
+    # Relational stats accumulators (for Relation Satisfaction Rate / mean violation)
+    rel_total_relations: float = 0.0
+    rel_total_satisfied: float = 0.0
+    rel_total_violation: float = 0.0
+
     # ---------- Training loop ----------
     while epoch < args.num_epochs:
         if use_ddp and getattr(dataloader, "train_sampler", None) is not None:
@@ -594,6 +604,12 @@ def main_worker(args: argparse.Namespace) -> None:
                     depth_pred, base_loss = model(image, text_feature_list, depth_gt)
                     if rel_loss_fn is not None and masks_batch is not None and relations_batch is not None:
                         rel_loss = rel_loss_fn(depth_pred, masks_batch, relations_batch)
+                        # Accumulate relational stats for analysis
+                        stats = getattr(rel_loss_fn, "last_stats", None)
+                        if stats is not None:
+                            rel_total_relations += stats.get("num_relations", 0.0)
+                            rel_total_satisfied += stats.get("num_satisfied", 0.0)
+                            rel_total_violation += stats.get("sum_violation", 0.0)
                     else:
                         rel_loss = depth_pred.new_tensor(0.0)
                     loss = base_loss + args.rel_weight * rel_loss
@@ -603,6 +619,11 @@ def main_worker(args: argparse.Namespace) -> None:
                 depth_pred, base_loss = model(image, text_feature_list, depth_gt)
                 if rel_loss_fn is not None and masks_batch is not None and relations_batch is not None:
                     rel_loss = rel_loss_fn(depth_pred, masks_batch, relations_batch)
+                    stats = getattr(rel_loss_fn, "last_stats", None)
+                    if stats is not None:
+                        rel_total_relations += stats.get("num_relations", 0.0)
+                        rel_total_satisfied += stats.get("num_satisfied", 0.0)
+                        rel_total_violation += stats.get("sum_violation", 0.0)
                 else:
                     rel_loss = depth_pred.new_tensor(0.0)
                 loss = base_loss + args.rel_weight * rel_loss
@@ -634,12 +655,34 @@ def main_worker(args: argparse.Namespace) -> None:
                 # Log loss
                 if global_step % args.log_freq == 0 and not model_just_loaded and summary_writer is not None:
                     summary_writer.add_scalar("training_loss", loss.item(), global_step)
+                    if use_relational and rel_total_relations > 0:
+                        rsr = rel_total_satisfied / max(rel_total_relations, 1e-6)
+                        mean_violation = rel_total_violation / max(rel_total_relations, 1e-6)
+                        summary_writer.add_scalar("relational/rsr", rsr, global_step)
+                        summary_writer.add_scalar("relational/mean_violation", mean_violation, global_step)
                 if is_main and global_step % args.log_freq == 0 and not model_just_loaded:
-                    logger.info("epoch=%d step=%d loss=%.4f", epoch, global_step, loss.item())
+                    if use_relational and rel_total_relations > 0:
+                        rsr = rel_total_satisfied / max(rel_total_relations, 1e-6)
+                        mean_violation = rel_total_violation / max(rel_total_relations, 1e-6)
+                        logger.info(
+                            "epoch=%d step=%d loss=%.4f RSR=%.4f mean_viol=%.5f (rels=%.0f)",
+                            epoch,
+                            global_step,
+                            loss.item(),
+                            rsr,
+                            mean_violation,
+                            rel_total_relations,
+                        )
+                    else:
+                        logger.info("epoch=%d step=%d loss=%.4f", epoch, global_step, loss.item())
 
-                # Periodic checkpoint
+                # Periodic checkpoint (for resume: model, step, and EMA if used)
                 if is_main and args.store_freq > 0 and global_step % args.store_freq == 0:
-                    torch.save({"global_step": global_step, "model": model.state_dict()}, os.path.join(out_path, f"model-{global_step}"))
+                    periodic_ckpt = {"global_step": global_step, "model": model.state_dict()}
+                    if ema is not None:
+                        periodic_ckpt["ema"] = ema.state_dict()
+                    torch.save(periodic_ckpt, os.path.join(out_path, f"model-{global_step}"))
+                    logger.info("Saved periodic checkpoint at step %d", global_step)
 
                 # Online eval
                 if (

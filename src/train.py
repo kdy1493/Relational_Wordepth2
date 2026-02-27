@@ -168,7 +168,12 @@ def _make_parser() -> argparse.ArgumentParser:
     # WorDepth
     parser.add_argument("--weight_kld", type=float, default=1e-3)
     parser.add_argument("--alter_prob", type=float, default=0.5)
-    parser.add_argument("--store_freq", type=int, default=0)
+    parser.add_argument(
+        "--store_freq",
+        type=int,
+        default=3000,
+        help="periodic checkpoint save every N steps (0=disable); enables resume from checkpoint",
+    )
     parser.add_argument("--legacy", action="store_true", help="keep skip connection in UNet")
 
     return parser
@@ -506,9 +511,12 @@ def main_worker(args: argparse.Namespace) -> None:
                 if is_main and global_step % args.log_freq == 0 and not model_just_loaded:
                     logger.info("epoch=%d step=%d loss=%.4f", epoch, global_step, loss.item())
 
-                # Periodic checkpoint
+                # Periodic checkpoint (for resume: model, step, and EMA if used)
                 if is_main and args.store_freq > 0 and global_step % args.store_freq == 0:
-                    torch.save({"global_step": global_step, "model": model.state_dict()}, os.path.join(out_path, f"model-{global_step}"))
+                    periodic_ckpt = {"global_step": global_step, "model": model.state_dict()}
+                    if ema is not None:
+                        periodic_ckpt["ema"] = ema.state_dict()
+                    torch.save(periodic_ckpt, os.path.join(out_path, f"model-{global_step}"))
 
                 # Online eval
                 if (

@@ -1,0 +1,55 @@
+# Relational WorDepth NYU — Exp2 (alpha ablation): statistical, alpha=0.5, lambda=0.1, margin=0.1
+
+mode: train
+model_name: nyu_train_relational_exp2_alpha05
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+depth_scale: 6553.5
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 8
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-6
+num_threads: 16
+input_height: 480
+input_width: 640
+max_depth: 10
+do_random_rotate: true
+degree: 2.5
+log_directory: ./runs/
+
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+
+do_online_eval: true
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+eval_freq: 3000
+
+weight_kld: 1e-3
+alter_prob: 0.01
+
+use_amp: true
+cache_images: false
+gpu_ids: "1"
+
+# Relational (statistical, alpha=0.5, lambda=0.1, margin=0.1)
+use_relational_loss: true
+use_dense_depth: true
+relations_dir_train: ./data/nyu_relational/median_train
+rel_weight: 0.1
+rel_margin: 0.1
+rel_min_pixels: 20
+rel_repr: statistical
+rel_statistical_alpha: 0.5
+

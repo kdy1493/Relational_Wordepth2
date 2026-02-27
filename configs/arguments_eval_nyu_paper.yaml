@@ -1,7 +1,7 @@
 # WorDepth NYU eval config (YAML). Eval is single-process.
 # Run:  python src/eval.py configs/arguments_eval_nyu_paper.yaml
 
-checkpoint_path: ./runs/nyu_train_paper/model-7000-best_abs_rel_0.03487
+checkpoint_path: ./runs/nyu_train_paper_v2/model-9000-best_abs_rel_0.03814
 dataset: nyu
 data_path_eval: ./data/nyu_v2_sync
 gt_path_eval: ./data/nyu_v2_sync

@@ -59,6 +59,14 @@ class RelationalDepthLoss(nn.Module):
         self.relu = nn.ReLU()
         self.debug_relational = bool(debug_relational)
 
+        # Last-batch stats for analysis (read-only from outside)
+        # Keys: num_relations, num_satisfied, sum_violation
+        self.last_stats: dict[str, float] = {
+            "num_relations": 0.0,
+            "num_satisfied": 0.0,
+            "sum_violation": 0.0,
+        }
+
     def forward(self, depth_pred, masks_batch, relations_batch):
         """Compute relational depth loss.
 
@@ -73,6 +81,8 @@ class RelationalDepthLoss(nn.Module):
 
         total_loss = depth_pred.new_tensor(0.0)
         valid_rel_count = 0
+        sum_violation = depth_pred.new_tensor(0.0)
+        num_satisfied = 0
 
         # min_valid fallback
         min_valid = self.min_valid_pixels
@@ -170,12 +180,28 @@ class RelationalDepthLoss(nn.Module):
 
             total_loss = total_loss + loss_vec.sum()
             valid_rel_count += int(loss_vec.numel())
+            sum_violation = sum_violation + violation.sum()
+            # count how many relations perfectly satisfy the margin (violation == 0)
+            num_satisfied += int((violation == 0).sum().item())
 
             if self.debug_relational and b == 0:
                 # Minimal debug sample
                 print(f"[RelLoss] b={b} objs={N_obj} valid_objs={int(obj_valid.sum())} rels={len(rels)}")
 
         if valid_rel_count == 0:
+            # Reset stats when no valid relations
+            self.last_stats = {
+                "num_relations": 0.0,
+                "num_satisfied": 0.0,
+                "sum_violation": 0.0,
+            }
             return depth_pred.new_tensor(0.0)
+
+        # Store last-batch stats (used for computing RSR/mean violation in the trainer)
+        self.last_stats = {
+            "num_relations": float(valid_rel_count),
+            "num_satisfied": float(num_satisfied),
+            "sum_violation": float(sum_violation.item()),
+        }
         return total_loss / valid_rel_count
 
