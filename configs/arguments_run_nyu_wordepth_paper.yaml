@@ -1,11 +1,14 @@
 # WorDepth NYU paper training config (YAML).
-# Single GPU:  python src/train.py configs/arguments_run_nyu_paper.yaml
-# Multi GPU:    torchrun --nproc_per_node=3 src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp
+# Single GPU:  python src/train.py configs/arguments_run_nyu_wordepth_paper.yaml
+  # Multi GPU:    torchrun --nproc_per_node=2 src/train.py configs/arguments_run_nyu_wordepth_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_wordepth_paper_$(date +%Y%m%d_%H%M).log
 # Tmux: tmux new -s train → source .venv/bin/activate → then (log in runs/ so run dir is not created in advance):
-#   torchrun --nproc_per_node=3 src/train.py configs/arguments_run_nyu_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_paper_v2_$(date +%Y%m%d_%H%M).log
+#   torchrun --nproc_per_node=2 --master_port=29521 src/train.py configs/arguments_run_nyu_wordepth_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_wordepth_paper_$(date +%Y%m%d_%H%M).log
+
+# 꼭 수정할 것! 
+# model_name, accumulation_steps, gpu_ids
 
 mode: train
-model_name: nyu_train_paper
+model_name: nyu_train_wordepth_paper
 pretrain: ./swin_large_patch4_window12_384_22k.pth
 dataset: nyu
 data_path: ./data/nyu_v2_sync
@@ -14,7 +17,7 @@ filenames_file: ./data_splits/nyudepthv2_train_split.txt
 depth_scale: 6553.5
 batch_size: 12
 num_epochs: 50
-accumulation_steps: 3
+accumulation_steps: 4
 learning_rate: 3e-5
 end_learning_rate: 1e-5
 lr_schedule: cosine
@@ -41,10 +44,10 @@ filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
 eval_freq: 3000
 
 weight_kld: 1e-3
-alter_prob: 0.01
+alter_prob: 0.5
 
 use_amp: true
 cache_images: true
-gpu_ids: "4,5,6"
+gpu_ids: "3,4"
 
 store_freq_epochs: 2.0

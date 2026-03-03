@@ -161,7 +161,13 @@ def _load_model_for_eval(args: argparse.Namespace, device: torch.device) -> torc
         alter_prob=args.alter_prob,
         legacy=args.legacy,
     )
-    ckpt = torch.load(args.checkpoint_path, map_location="cpu")
+    # PyTorch 2.6+: torch.load defaults to weights_only=True, which can break
+    # loading older checkpoints. Explicitly disable weights_only where
+    # supported, with a backward-compatible fallback.
+    try:
+        ckpt = torch.load(args.checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        ckpt = torch.load(args.checkpoint_path, map_location="cpu")
     model_state: Dict[str, torch.Tensor] = ckpt["model"]
     # DataParallel/DDP 호환: "module." prefix 제거
     if any(key.startswith("module.") for key in model_state.keys()):

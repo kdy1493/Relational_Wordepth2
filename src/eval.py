@@ -228,7 +228,13 @@ def run_eval_only() -> None:
         alter_prob=args.alter_prob,
         legacy=args.legacy,
     )
-    ckpt = torch.load(args.checkpoint_path, map_location="cpu")
+    # PyTorch 2.6+: torch.load defaults to weights_only=True, which can break
+    # loading older checkpoints that rely on full pickling. Explicitly disable
+    # weights_only where supported, with a backward-compatible fallback.
+    try:
+        ckpt = torch.load(args.checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        ckpt = torch.load(args.checkpoint_path, map_location="cpu")
     model_state = ckpt["model"]
     # Checkpoint may be from DataParallel/DDP (keys like "module.backbone....");
     # load into unwrapped model first, so strip "module." prefix if present.

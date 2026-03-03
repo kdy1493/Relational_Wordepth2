@@ -1,8 +1,10 @@
 # WorDepth NYU RSR eval config (NYU test + statistical_test relations)
 # Run (repo root 기준):
 #   python src/relational_eval_rsr.py @configs/arguments_eval_nyu_rsr.yaml
+# 수정할 것 
+# checkpoint_path, relations_dir_eval, gpu_ids
 
-checkpoint_path: ./runs/nyu_train_wordepth_paper/model-9000-best_abs_rel_0.03814
+checkpoint_path: ./runs/nyu_train_baseline/model-12000-best_abs_rel_0.03285
 
 dataset: nyu
 data_path_eval: ./data/nyu_v2_sync
@@ -17,7 +19,7 @@ min_depth_eval: 1e-3
 max_depth_eval: 10
 
 # Optional: GPU 선택 (없으면 기본 CUDA:0)
-gpu_ids: "4"
+gpu_ids: "1"
 
 # Relational annotation (NYU test, statistical representative 기준)
 relations_dir_eval: ./data/nyu_relational/statistical_test
@@ -28,5 +30,5 @@ rel_statistical_alpha: 1.0
 rel_margin: 0.5
 rel_min_pixels: 20
 
-viz_dir: runs/nyu_train_wordepth_paper/rsr_viz
+viz_dir: runs/nyu_train_baseline/rsr_viz
 viz_topk: 20
