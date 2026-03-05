@@ -91,6 +91,7 @@ def _make_rsr_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_kld", type=float, default=1e-3)
     parser.add_argument("--alter_prob", type=float, default=0.5)
     parser.add_argument("--legacy", action="store_true")
+    parser.add_argument("--baseline_arch", action="store_true", help="Evaluate baseline checkpoint (Swin-L + depth decoder only); no text path")
     parser.add_argument("--gpu_ids", type=str, default=None, help="comma-separated GPU ids")
 
     # DataLoader / 기타
@@ -152,6 +153,7 @@ def _make_rsr_parser() -> argparse.ArgumentParser:
 
 def _load_model_for_eval(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
     """Load WorDepth model and checkpoint onto device."""
+    baseline_arch = getattr(args, "baseline_arch", False)
     model = WorDepth(
         pretrained=args.pretrain,
         max_depth=args.max_depth,
@@ -160,6 +162,7 @@ def _load_model_for_eval(args: argparse.Namespace, device: torch.device) -> torc
         weight_kld=args.weight_kld,
         alter_prob=args.alter_prob,
         legacy=args.legacy,
+        baseline_arch=baseline_arch,
     )
     # PyTorch 2.6+: torch.load defaults to weights_only=True, which can break
     # loading older checkpoints. Explicitly disable weights_only where
@@ -172,7 +175,7 @@ def _load_model_for_eval(args: argparse.Namespace, device: torch.device) -> torc
     # DataParallel/DDP 호환: "module." prefix 제거
     if any(key.startswith("module.") for key in model_state.keys()):
         model_state = {key.replace("module.", "", 1): value for key, value in model_state.items()}
-    model.load_state_dict(model_state, strict=True)
+    model.load_state_dict(model_state, strict=not baseline_arch)
 
     if device.type == "cuda":
         model = torch.nn.DataParallel(model)
@@ -253,7 +256,8 @@ def compute_rsr_for_checkpoint(args: argparse.Namespace) -> Tuple[float, float, 
 
     model = _load_model_for_eval(args, device)
     dataloader_eval = _build_relational_dataloader(args)
-    text_cache = _preload_text_features_for_eval(args)
+    baseline_arch = getattr(args, "baseline_arch", False)
+    text_cache = None if baseline_arch else _preload_text_features_for_eval(args)
 
     rel_loss_fn = RelationalDepthLoss(
         margin_rank=args.rel_margin,
@@ -281,22 +285,26 @@ def compute_rsr_for_checkpoint(args: argparse.Namespace) -> Tuple[float, float, 
         with torch.no_grad():
             image = batch["image"].to(device, non_blocking=True)
 
-            # text features: cache에서 우선 조회, 없으면 디스크에서 on-demand 로딩
-            text_list = []
-            first_path = batch["sample_path"][0].split(" ")[0]
-            text_feat_mode = "test" if "/test/" in first_path or first_path.lstrip("/").startswith("test/") else "train"
-            text_feat_dir = os.path.join(_REPO_ROOT, "data", "text_feat", args.dataset, text_feat_mode)
-            for sample_path in batch["sample_path"]:
-                rgb_key = sample_path.split(" ")[0][:-4]
-                feat = text_cache.get(rgb_key)
-                if feat is None:
-                    pt_path = _text_feat_pt_path(text_feat_dir, rgb_key)
-                    if pt_path is None:
-                        raise FileNotFoundError(f"Text feature not found for {rgb_key} under {text_feat_dir}")
-                    feat = torch.load(pt_path, map_location="cpu")
-                    text_cache[rgb_key] = feat
-                text_list.append(feat.to(device))
-            text_feature_list = torch.cat(text_list, dim=0)
+            # text features: baseline_arch면 사용 안 함 (zeros); 아니면 cache/디스크에서 로딩
+            if baseline_arch:
+                batch_size = image.size(0)
+                text_feature_list = torch.zeros(batch_size, 1024, device=device, dtype=torch.float32)
+            else:
+                text_list = []
+                first_path = batch["sample_path"][0].split(" ")[0]
+                text_feat_mode = "test" if "/test/" in first_path or first_path.lstrip("/").startswith("test/") else "train"
+                text_feat_dir = os.path.join(_REPO_ROOT, "data", "text_feat", args.dataset, text_feat_mode)
+                for sample_path in batch["sample_path"]:
+                    rgb_key = sample_path.split(" ")[0][:-4]
+                    feat = text_cache.get(rgb_key)
+                    if feat is None:
+                        pt_path = _text_feat_pt_path(text_feat_dir, rgb_key)
+                        if pt_path is None:
+                            raise FileNotFoundError(f"Text feature not found for {rgb_key} under {text_feat_dir}")
+                        feat = torch.load(pt_path, map_location="cpu")
+                        text_cache[rgb_key] = feat
+                    text_list.append(feat.to(device))
+                text_feature_list = torch.cat(text_list, dim=0)
 
             # WorDepth forward: inference 모드 (loss 계산 없음)
             pred_depth = eval_model(image, text_feature_list, sample_from_gaussian=False)

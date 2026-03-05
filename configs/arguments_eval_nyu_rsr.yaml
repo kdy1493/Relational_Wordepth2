@@ -1,10 +1,11 @@
 # WorDepth NYU RSR eval config (NYU test + statistical_test relations)
 # Run (repo root 기준):
 #   python src/relational_eval_rsr.py @configs/arguments_eval_nyu_rsr.yaml
-# 수정할 것 
-# checkpoint_path, relations_dir_eval, gpu_ids
+# 수정할 것: checkpoint_path, relations_dir_eval, gpu_ids
+# Baseline 체크포인트일 때만 baseline_arch: true, WorDepth/Relational이면 false
 
 checkpoint_path: ./runs/nyu_train_baseline/model-12000-best_abs_rel_0.03285
+baseline_arch: true
 
 dataset: nyu
 data_path_eval: ./data/nyu_v2_sync

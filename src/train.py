@@ -188,6 +188,11 @@ def _make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="image-only baseline: do not load text features; feed zero text embeddings",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="use torch.compile(model) for faster forward/backward (PyTorch 2+); first epoch can be slower",
+    )
 
     return parser
 
@@ -354,7 +359,8 @@ def main_worker(args: argparse.Namespace) -> None:
             if os.path.isfile(src):
                 os.system('cp "' + src + '" "' + out_path + "/" + label + '"')
 
-    # Model
+    # Model (baseline_arch=True => paper-style baseline: Swin-L + depth decoder only, no text path)
+    baseline_mode = getattr(args, "baseline_mode", False)
     model = WorDepth(
         pretrained=args.pretrain,
         max_depth=args.max_depth,
@@ -363,8 +369,20 @@ def main_worker(args: argparse.Namespace) -> None:
         weight_kld=args.weight_kld,
         alter_prob=args.alter_prob,
         legacy=args.legacy,
+        baseline_arch=baseline_mode,
     )
     model.train()
+
+    # Optional: torch.compile for faster step (PyTorch 2+); first run compiles and can be slower.
+    # Use mode="default" to avoid CUDA graph overwrite errors with Swin (reduce-overhead can crash).
+    if getattr(args, "compile", False):
+        _compile = getattr(torch, "compile", None)
+        if _compile is not None:
+            model = _compile(model, mode="default")
+            if is_main:
+                logger.info("Model wrapped with torch.compile(mode='default')")
+        elif is_main:
+            logger.warning("--compile set but torch.compile not available (PyTorch 2+ required); ignoring")
 
     if is_main:
         nparams = sum(p.numel() for p in model.parameters())
@@ -407,13 +425,16 @@ def main_worker(args: argparse.Namespace) -> None:
         if is_main:
             logger.info("EMA enabled (decay=%.4f)", ema.decay)
 
-    # Load checkpoint
+    # Load checkpoint (strict=False when baseline_arch so full-WorDepth ckpt can supply backbone/ref/outc only)
     model_just_loaded = False
     if args.checkpoint_path and os.path.isfile(args.checkpoint_path):
         if is_main:
             logger.info("Loading checkpoint: %s", args.checkpoint_path)
         ckpt = torch.load(args.checkpoint_path, map_location="cpu")
-        model.load_state_dict(ckpt["model"], strict=True)
+        load_strict = not baseline_mode
+        model.load_state_dict(ckpt["model"], strict=load_strict)
+        if is_main and not load_strict:
+            logger.info("Loaded checkpoint with strict=False (baseline_arch: only matching keys applied).")
         if not args.retrain:
             global_step = ckpt.get("global_step", 0)
             best_lower = ckpt.get("best_eval_measures_lower_better", best_lower).cpu()
@@ -431,12 +452,11 @@ def main_worker(args: argparse.Namespace) -> None:
     torch.backends.cudnn.benchmark = True
 
     # Data
-    baseline_mode = getattr(args, "baseline_mode", False)
     text_feat_cache: Optional[Dict[str, torch.Tensor]]
     if baseline_mode:
         text_feat_cache = None
         if is_main:
-            logger.info("Baseline mode enabled: skipping text feature preload (using zero text embeddings).")
+            logger.info("Baseline mode enabled: baseline_arch (Swin-L + depth decoder only), no text path.")
     else:
         text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
     dataloader = NewDataLoader(args, "train")

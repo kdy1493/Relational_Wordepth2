@@ -181,7 +181,7 @@ class Text_Encoder(nn.Module):
         return mean, std, logvar
 
 class WorDepth(nn.Module):
-    def __init__(self, pretrained=None, max_depth=10.0, prior_mean=1.54, si_lambda=0.85, img_size=(480, 640), weight_kld=1e-3, alter_prob=0.5, legacy=False):
+    def __init__(self, pretrained=None, max_depth=10.0, prior_mean=1.54, si_lambda=0.85, img_size=(480, 640), weight_kld=1e-3, alter_prob=0.5, legacy=False, baseline_arch=False):
         '''
         WorDepth Model Network class
 
@@ -202,11 +202,15 @@ class WorDepth(nn.Module):
                 Probablity to draw from gaussian in this forward
             legacy: bool
                 Whether to train (or eval) the legacy version, which keeps skip connection during feature decoding
+            baseline_arch: bool
+                If True, paper-style baseline: Swin-L + depth decoder only (no text encoder, no eps_layer).
+                d_feat is produced from image by a single conv (baseline_d_feat). Use with baseline_mode in train/eval.
         '''
         super().__init__()
         self.prior_mean = prior_mean
         self.SI_loss_lambda = si_lambda
         self.max_depth = max_depth
+        self.baseline_arch = baseline_arch
 
         pretrain_img_size = img_size
         patch_size = (4, 4)
@@ -236,8 +240,6 @@ class WorDepth(nn.Module):
 
         self.outc = OutConv(128, 1, self.prior_mean)
 
-        self.eps_layer = EpsLayer(512, img_size[0]//16, img_size[1]//16)
-
         self.ref_4 = Refine(512, 128)
         self.ref_3 = Refine(256, 128)
         self.ref_2 = Refine(64, 128)
@@ -249,10 +251,24 @@ class WorDepth(nn.Module):
             MetricLayer(1536)
         )
 
-        self.text_encoder = Text_Encoder(hidden_dim=128)
-        self.weight_kld = weight_kld
-        self.alter_prob = alter_prob
-        self.legacy = legacy
+        if baseline_arch:
+            # Paper-style baseline: image -> backbone -> d_feat (no text, no eps_layer)
+            self.baseline_d_feat = nn.Sequential(
+                nn.Conv2d(512, 256, kernel_size=3, padding=1),
+                nn.LeakyReLU(),
+                nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            )
+            self.eps_layer = None
+            self.text_encoder = None
+            self.weight_kld = 0.0
+            self.alter_prob = 0.0
+            self.legacy = legacy
+        else:
+            self.eps_layer = EpsLayer(512, img_size[0]//16, img_size[1]//16)
+            self.text_encoder = Text_Encoder(hidden_dim=128)
+            self.weight_kld = weight_kld
+            self.alter_prob = alter_prob
+            self.legacy = legacy
 
     def forward(self, image, text_feature_list, depth_gt=None, sample_from_gaussian=None):
         '''
@@ -262,7 +278,7 @@ class WorDepth(nn.Module):
             image: torch.Tensor[float32]
                 N x 3 x Height (480 for nyu) x Width (640 for nyu)
             text_feature_list: torch.Tensor[float32]
-                N x text_feat_dim(1024 by default)
+                N x text_feat_dim(1024 by default); ignored when baseline_arch=True
             depth_gt: torch.Tensor[float32]
                 N x 1 x Height (480 for nyu) x Width (640 for nyu)
             sample_from_gaussian: bool
@@ -272,19 +288,39 @@ class WorDepth(nn.Module):
             depth_pred: torch.Tensor[float32]
                 N x 1 x Height (480 for nyu) x Width (640 for nyu)
         '''
+        x2, x3, x4, x5 = self.backbone(image)
+        metric = self.mlayer(x5)
+        x = self.up_4(x5, x4)
+        B, _, H, W = x.shape
+        hidden_dim = 128
+
+        # Baseline (paper-style): Swin-L + depth decoder only, no text path
+        if self.baseline_arch:
+            d_feat = self.baseline_d_feat(x)
+            if self.legacy is not True:
+                x = torch.zeros_like(x)
+                x3 = torch.zeros_like(x3)
+                x2 = torch.zeros_like(x2)
+            x, d_feat = self.ref_4(x, d_feat)
+            d_u4 = F.interpolate(d_feat, scale_factor=16, mode='bilinear', align_corners=True)
+            x = self.up_3(x, x3)
+            x, d_feat = self.ref_3(x, F.interpolate(d_feat, scale_factor=2, mode='bilinear', align_corners=True))
+            d_u3 = F.interpolate(d_feat, scale_factor=8, mode='bilinear', align_corners=True)
+            x = self.up_2(x, x2)
+            x, d_feat = self.ref_2(x, F.interpolate(d_feat, scale_factor=2, mode='bilinear', align_corners=True))
+            d_u2 = F.interpolate(d_feat, scale_factor=4, mode='bilinear', align_corners=True)
+            d_feat = d_u2 + d_u3 + d_u4
+            depth_pred = torch.sigmoid(metric[:, 0:1]) * (self.outc(d_feat) + torch.exp(metric[:, 1:2]))
+            if self.training:
+                loss = self.si_loss(depth_pred, depth_gt)
+                return depth_pred, loss
+            return depth_pred
+
         if sample_from_gaussian is None:
             if random.random() < self.alter_prob:
                 sample_from_gaussian = True
             else:
                 sample_from_gaussian = False
-
-        x2, x3, x4, x5 = self.backbone(image)
-
-        metric = self.mlayer(x5)
-
-        x = self.up_4(x5, x4)
-        B, _, H, W = x.shape
-        hidden_dim = 128
 
         # Mean and Std generated by Text
         mean_txt, std_txt, log_var_txt = self.text_encoder(text_feature_list)  # B*128, global text feature for mean and std

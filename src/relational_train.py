@@ -266,6 +266,30 @@ def _make_parser() -> argparse.ArgumentParser:
         help="for --rel_repr statistical: representative = mean + alpha * std",
     )
     parser.add_argument(
+        "--rel_lambda_schedule",
+        type=str,
+        default="constant",
+        choices=["constant", "warmup", "cosine"],
+        help="schedule for relational loss weight: constant | warmup (linear) | cosine (annealed from 0 to rel_weight)",
+    )
+    parser.add_argument(
+        "--rel_lambda_warmup_steps",
+        type=int,
+        default=0,
+        help="number of global steps to keep relational weight at 0 before ramping up (only for non-constant schedules)",
+    )
+    parser.add_argument(
+        "--rel_lambda_ramp_steps",
+        type=int,
+        default=0,
+        help="number of global steps to ramp relational weight from 0 to rel_weight (only for non-constant schedules)",
+    )
+    parser.add_argument(
+        "--rel_loss_normalize",
+        action="store_true",
+        help="normalize relational loss by an EMA of its magnitude so its effective scale stays stable over training",
+    )
+    parser.add_argument(
         "--debug_relational",
         action="store_true",
         help="enable verbose debugging for relational annotations",
@@ -436,7 +460,8 @@ def main_worker(args: argparse.Namespace) -> None:
             if os.path.isfile(src):
                 os.system('cp "' + src + '" "' + out_path + "/" + label + '"')
 
-    # Model
+    # Model (baseline_arch=True when baseline_mode: Swin-L + depth decoder only, no text path)
+    baseline_mode = getattr(args, "baseline_mode", False)
     model = WorDepth(
         pretrained=args.pretrain,
         max_depth=args.max_depth,
@@ -445,6 +470,7 @@ def main_worker(args: argparse.Namespace) -> None:
         weight_kld=args.weight_kld,
         alter_prob=args.alter_prob,
         legacy=args.legacy,
+        baseline_arch=baseline_mode,
     )
     model.train()
 
@@ -504,13 +530,16 @@ def main_worker(args: argparse.Namespace) -> None:
         if is_main:
             logger.info("EMA enabled (decay=%.4f)", ema.decay)
 
-    # Load checkpoint
+    # Load checkpoint (strict=False when baseline_arch so baseline ckpt keys match only)
     model_just_loaded = False
     if args.checkpoint_path and os.path.isfile(args.checkpoint_path):
         if is_main:
             logger.info("Loading checkpoint: %s", args.checkpoint_path)
         ckpt = torch.load(args.checkpoint_path, map_location="cpu")
-        model.load_state_dict(ckpt["model"], strict=True)
+        load_strict = not baseline_mode
+        model.load_state_dict(ckpt["model"], strict=load_strict)
+        if is_main and not load_strict:
+            logger.info("Loaded checkpoint with strict=False (baseline_arch: only matching keys applied).")
         if not args.retrain:
             global_step = ckpt.get("global_step", 0)
             best_lower = ckpt.get("best_eval_measures_lower_better", best_lower).cpu()
@@ -528,12 +557,11 @@ def main_worker(args: argparse.Namespace) -> None:
     torch.backends.cudnn.benchmark = True
 
     # Data
-    baseline_mode = getattr(args, "baseline_mode", False)
     text_feat_cache: Optional[Dict[str, torch.Tensor]]
     if baseline_mode:
         text_feat_cache = None
         if is_main:
-            logger.info("Baseline mode enabled: skipping text feature preload (using zero text embeddings).")
+            logger.info("Baseline mode enabled: baseline_arch (Swin-L + depth decoder only), no text path.")
     else:
         text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
 
@@ -592,6 +620,8 @@ def main_worker(args: argparse.Namespace) -> None:
     rel_total_relations: float = 0.0
     rel_total_satisfied: float = 0.0
     rel_total_violation: float = 0.0
+    # EMA of relational loss magnitude (for optional normalization)
+    rel_loss_ma: float = 0.0
 
     # ---------- Training loop ----------
     while epoch < args.num_epochs:
@@ -654,7 +684,27 @@ def main_worker(args: argparse.Namespace) -> None:
                             rel_total_violation += stats.get("sum_violation", 0.0)
                     else:
                         rel_loss = depth_pred.new_tensor(0.0)
-                    loss = base_loss + args.rel_weight * rel_loss
+                    # Optional normalization of relational loss magnitude
+                    effective_rel_loss = rel_loss
+                    if getattr(args, "rel_loss_normalize", False) and use_relational:
+                        rel_loss_ma = 0.99 * rel_loss_ma + 0.01 * float(rel_loss.detach().cpu())
+                        if rel_loss_ma > 0:
+                            effective_rel_loss = rel_loss / rel_loss_ma
+                    # Scheduled relational weight (lambda)
+                    cur_rel_weight = getattr(args, "rel_weight", 0.0)
+                    schedule = getattr(args, "rel_lambda_schedule", "constant")
+                    if use_relational and cur_rel_weight > 0.0 and schedule != "constant":
+                        warmup_steps = int(getattr(args, "rel_lambda_warmup_steps", 0))
+                        ramp_steps = int(getattr(args, "rel_lambda_ramp_steps", 0))
+                        if global_step < warmup_steps:
+                            cur_rel_weight = 0.0
+                        elif ramp_steps > 0:
+                            t = min(1.0, float(global_step - warmup_steps) / max(ramp_steps, 1))
+                            if schedule == "warmup":
+                                cur_rel_weight = cur_rel_weight * t
+                            elif schedule == "cosine":
+                                cur_rel_weight = cur_rel_weight * 0.5 * (1.0 - math.cos(math.pi * t))
+                    loss = base_loss + cur_rel_weight * effective_rel_loss
                 loss = loss.mean() if loss.numel() > 1 else loss
                 scaler.scale(loss / accumulation_steps).backward()
             else:
@@ -668,7 +718,27 @@ def main_worker(args: argparse.Namespace) -> None:
                         rel_total_violation += stats.get("sum_violation", 0.0)
                 else:
                     rel_loss = depth_pred.new_tensor(0.0)
-                loss = base_loss + args.rel_weight * rel_loss
+                # Optional normalization of relational loss magnitude
+                effective_rel_loss = rel_loss
+                if getattr(args, "rel_loss_normalize", False) and use_relational:
+                    rel_loss_ma = 0.99 * rel_loss_ma + 0.01 * float(rel_loss.detach().cpu())
+                    if rel_loss_ma > 0:
+                        effective_rel_loss = rel_loss / rel_loss_ma
+                # Scheduled relational weight (lambda)
+                cur_rel_weight = getattr(args, "rel_weight", 0.0)
+                schedule = getattr(args, "rel_lambda_schedule", "constant")
+                if use_relational and cur_rel_weight > 0.0 and schedule != "constant":
+                    warmup_steps = int(getattr(args, "rel_lambda_warmup_steps", 0))
+                    ramp_steps = int(getattr(args, "rel_lambda_ramp_steps", 0))
+                    if global_step < warmup_steps:
+                        cur_rel_weight = 0.0
+                    elif ramp_steps > 0:
+                        t = min(1.0, float(global_step - warmup_steps) / max(ramp_steps, 1))
+                        if schedule == "warmup":
+                            cur_rel_weight = cur_rel_weight * t
+                        elif schedule == "cosine":
+                            cur_rel_weight = cur_rel_weight * 0.5 * (1.0 - math.cos(math.pi * t))
+                loss = base_loss + cur_rel_weight * effective_rel_loss
                 loss = loss.mean() if loss.numel() > 1 else loss
                 (loss / accumulation_steps).backward()
 

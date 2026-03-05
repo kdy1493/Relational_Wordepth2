@@ -70,17 +70,22 @@ def online_eval(
             if not has_valid_depth:
                 continue
 
-            text_feature_list = []
-            first_path = eval_sample_batched["sample_path"][0].split(" ")[0]
-            text_feat_mode = "test" if "/test/" in first_path or first_path.lstrip("/").startswith("test/") else "train"
-            text_feat_dir = os.path.join(_REPO_ROOT, "data", "text_feat", "nyu" if args.dataset == "nyu" else "kitti", text_feat_mode)
-            for i in range(len(eval_sample_batched["sample_path"])):
-                sample_key = eval_sample_batched["sample_path"][i].split(" ")[0][:-4]
-                pt_path = _text_feat_pt_path(text_feat_dir, sample_key)
-                if pt_path is None:
-                    raise FileNotFoundError(f"Text feature not found for {sample_key} under {text_feat_dir}")
-                text_feature_list.append(torch.load(pt_path, map_location=image.device))
-            text_feature_list = torch.cat(text_feature_list, dim=0)
+            baseline_arch = getattr(args, "baseline_arch", False)
+            if baseline_arch:
+                batch_size = image.size(0)
+                text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+            else:
+                text_feature_list = []
+                first_path = eval_sample_batched["sample_path"][0].split(" ")[0]
+                text_feat_mode = "test" if "/test/" in first_path or first_path.lstrip("/").startswith("test/") else "train"
+                text_feat_dir = os.path.join(_REPO_ROOT, "data", "text_feat", "nyu" if args.dataset == "nyu" else "kitti", text_feat_mode)
+                for i in range(len(eval_sample_batched["sample_path"])):
+                    sample_key = eval_sample_batched["sample_path"][i].split(" ")[0][:-4]
+                    pt_path = _text_feat_pt_path(text_feat_dir, sample_key)
+                    if pt_path is None:
+                        raise FileNotFoundError(f"Text feature not found for {sample_key} under {text_feat_dir}")
+                    text_feature_list.append(torch.load(pt_path, map_location=image.device))
+                text_feature_list = torch.cat(text_feature_list, dim=0)
 
             pred_depth = eval_model(image, text_feature_list, sample_from_gaussian=False)
             pred_depth = pred_depth.cpu().numpy().squeeze()
@@ -187,6 +192,7 @@ def _make_eval_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_kld", type=float, default=1e-3)
     parser.add_argument("--alter_prob", type=float, default=0.5)
     parser.add_argument("--legacy", action="store_true")
+    parser.add_argument("--baseline_arch", action="store_true", help="Evaluate baseline (Swin-L + depth decoder only); no text path, use with baseline checkpoint")
     parser.add_argument("--post_process", action="store_true", help="median scaling before metrics")
     parser.add_argument("--gpu_ids", type=str, default=None, help="comma-separated GPU ids")
     return parser
@@ -219,6 +225,7 @@ def run_eval_only() -> None:
     from dataloaders.dataloader import NewDataLoader
     from networks.wordepth import WorDepth
 
+    baseline_arch = getattr(args, "baseline_arch", False)
     model = WorDepth(
         pretrained=args.pretrain,
         max_depth=args.max_depth,
@@ -227,6 +234,7 @@ def run_eval_only() -> None:
         weight_kld=args.weight_kld,
         alter_prob=args.alter_prob,
         legacy=args.legacy,
+        baseline_arch=baseline_arch,
     )
     # PyTorch 2.6+: torch.load defaults to weights_only=True, which can break
     # loading older checkpoints that rely on full pickling. Explicitly disable
@@ -240,7 +248,7 @@ def run_eval_only() -> None:
     # load into unwrapped model first, so strip "module." prefix if present.
     if any(k.startswith("module.") for k in model_state.keys()):
         model_state = {k.replace("module.", "", 1): v for k, v in model_state.items()}
-    model.load_state_dict(model_state, strict=True)
+    model.load_state_dict(model_state, strict=not baseline_arch)
     if device.type == "cuda":
         model = torch.nn.DataParallel(model)
     model = model.to(device)
