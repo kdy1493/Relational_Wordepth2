@@ -85,12 +85,12 @@ def compute_rep_gpu(depth_t, mask_t, alpha=1.0, min_valid=1e-3):
 
 
 def _process_chunk(args_tuple):
-    """워커 프로세스용: lines 청크 처리 후 (gaps, n_skip_rel, n_skip_depth, n_skip_masks, n_pairs) 반환."""
+    """워커 프로세스용: lines 청크 처리 후 (gaps, n_skip_rel, n_skip_depth, n_skip_masks, n_pairs, n_violations) 반환."""
     (lines_chunk, relations_dir_train, gt_path, depth_scale, rel_statistical_alpha,
      rel_min_pixels, use_dense_depth) = args_tuple
     import cv2
     gaps = []
-    n_skip_rel = n_skip_depth = n_skip_masks = 0
+    n_skip_rel = n_skip_depth = n_skip_masks = n_violations = 0
     for line in lines_chunk:
         rgb_file = _rgb_file_from_split(line)
         if not rgb_file:
@@ -137,18 +137,27 @@ def _process_chunk(args_tuple):
                 i, j = rel.get("subject_idx"), rel.get("object_idx")
                 if i is None or j is None or i >= masks.shape[0] or j >= masks.shape[0]:
                     continue
-                mask_i = masks[i] > 0.5
-                mask_j = masks[j] > 0.5
+                rel_type = str(rel.get("relation", "front")).lower()
+                if rel_type not in ("front", "behind"):
+                    continue
+                # front => subject closer (rep_i < rep_j); behind => object closer (rep_j < rep_i)
+                closer_idx, farther_idx = (i, j) if rel_type == "front" else (j, i)
+                mask_i = masks[closer_idx] > 0.5
+                mask_j = masks[farther_idx] > 0.5
                 if np.sum(mask_i) < rel_min_pixels or np.sum(mask_j) < rel_min_pixels:
                     continue
-                rep_i = compute_rep(depth_meters, mask_i, rel_statistical_alpha)
-                rep_j = compute_rep(depth_meters, mask_j, rel_statistical_alpha)
-                if rep_i is None or rep_j is None:
+                rep_c = compute_rep(depth_meters, mask_i, rel_statistical_alpha)
+                rep_f = compute_rep(depth_meters, mask_j, rel_statistical_alpha)
+                if rep_c is None or rep_f is None:
                     continue
-                gaps.append(abs(rep_i - rep_j))
+                gap = abs(rep_c - rep_f)
+                gaps.append(gap)
+                # violation: GT says "closer" should be nearer; if rep_closer >= rep_farther, label is inconsistent
+                if rep_c >= rep_f:
+                    n_violations += 1
         except Exception:
             continue
-    return (gaps, n_skip_rel, n_skip_depth, n_skip_masks, len(gaps))
+    return (gaps, n_skip_rel, n_skip_depth, n_skip_masks, len(gaps), n_violations)
 
 
 def main():
@@ -199,6 +208,7 @@ def main():
     num_skipped_no_depth = 0
     num_skipped_no_masks = 0
     num_pairs = 0
+    num_violations = 0
 
     if n_workers > 1:
         # 멀티프로세싱: 청크별로 병렬 처리 (가장 빠름)
@@ -211,12 +221,13 @@ def main():
         ]
         with mp.Pool(n_workers) as pool:
             results = pool.map(_process_chunk, args_tuples)
-        for (gaps_chunk, a, b, c, n) in results:
+        for (gaps_chunk, a, b, c, n, v) in results:
             gaps.extend(gaps_chunk)
             num_skipped_no_rel += a
             num_skipped_no_depth += b
             num_skipped_no_masks += c
             num_pairs += n
+            num_violations += v
     else:
         # 단일 프로세스 (기존 로직, optional GPU)
         import cv2
@@ -273,27 +284,41 @@ def main():
                         i, j = rel.get("subject_idx"), rel.get("object_idx")
                         if i is None or j is None or i >= masks_t.shape[0] or j >= masks_t.shape[0]:
                             continue
-                        mask_i, mask_j = masks_t[i] > 0.5, masks_t[j] > 0.5
-                        if mask_i.sum().item() < args.rel_min_pixels or mask_j.sum().item() < args.rel_min_pixels:
+                        rel_type = str(rel.get("relation", "front")).lower()
+                        if rel_type not in ("front", "behind"):
                             continue
-                        rep_i = compute_rep_gpu(depth_t, mask_i, args.rel_statistical_alpha)
-                        rep_j = compute_rep_gpu(depth_t, mask_j, args.rel_statistical_alpha)
-                        if rep_i is None or rep_j is None:
+                        closer_idx, farther_idx = (i, j) if rel_type == "front" else (j, i)
+                        mask_c = masks_t[closer_idx] > 0.5
+                        mask_f = masks_t[farther_idx] > 0.5
+                        if mask_c.sum().item() < args.rel_min_pixels or mask_f.sum().item() < args.rel_min_pixels:
                             continue
-                        gaps.append(abs(rep_i - rep_j))
+                        rep_c = compute_rep_gpu(depth_t, mask_c, args.rel_statistical_alpha)
+                        rep_f = compute_rep_gpu(depth_t, mask_f, args.rel_statistical_alpha)
+                        if rep_c is None or rep_f is None:
+                            continue
+                        gaps.append(abs(rep_c - rep_f))
+                        if rep_c >= rep_f:
+                            num_violations += 1
                 else:
                     for rel in relations:
                         i, j = rel.get("subject_idx"), rel.get("object_idx")
                         if i is None or j is None or i >= masks.shape[0] or j >= masks.shape[0]:
                             continue
-                        mask_i, mask_j = masks[i] > 0.5, masks[j] > 0.5
-                        if np.sum(mask_i) < args.rel_min_pixels or np.sum(mask_j) < args.rel_min_pixels:
+                        rel_type = str(rel.get("relation", "front")).lower()
+                        if rel_type not in ("front", "behind"):
                             continue
-                        rep_i = compute_rep(depth_meters, mask_i, args.rel_statistical_alpha)
-                        rep_j = compute_rep(depth_meters, mask_j, args.rel_statistical_alpha)
-                        if rep_i is None or rep_j is None:
+                        closer_idx, farther_idx = (i, j) if rel_type == "front" else (j, i)
+                        mask_c = masks[closer_idx] > 0.5
+                        mask_f = masks[farther_idx] > 0.5
+                        if np.sum(mask_c) < args.rel_min_pixels or np.sum(mask_f) < args.rel_min_pixels:
                             continue
-                        gaps.append(abs(rep_i - rep_j))
+                        rep_c = compute_rep(depth_meters, mask_c, args.rel_statistical_alpha)
+                        rep_f = compute_rep(depth_meters, mask_f, args.rel_statistical_alpha)
+                        if rep_c is None or rep_f is None:
+                            continue
+                        gaps.append(abs(rep_c - rep_f))
+                        if rep_c >= rep_f:
+                            num_violations += 1
             except Exception as e:
                 if idx < 3:
                     print(f"Warning: {rel_path}: {e}", file=sys.stderr)
@@ -316,6 +341,10 @@ def main():
     print(f"  Skipped (no depth):   {num_skipped_no_depth}")
     print(f"  Skipped (no masks):   {num_skipped_no_masks}")
     print(f"  Total pairs:          {num_pairs}")
+    if num_pairs > 0:
+        vrate = 100.0 * num_violations / num_pairs
+        print(f"  GT label violations:  {num_violations} ({vrate:.2f}%)  [rep_closer >= rep_farther]")
+        print("  -> High violation rate suggests relation/mask noise or rep definition mismatch.")
     print()
     if num_pairs == 0:
         print("No pairs collected. Check paths and relation files.")

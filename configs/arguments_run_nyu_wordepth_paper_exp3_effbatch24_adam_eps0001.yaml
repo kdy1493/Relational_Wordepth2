@@ -1,0 +1,53 @@
+# WorDepth NYU paper training config (YAML).
+# Single GPU:  python src/train.py configs/arguments_run_nyu_wordepth_paper_exp3_effbatch24_adam_eps0001.yaml   2>&1 | tee runs/train_nyu_train_wordepth_paper_exp3_effbatch24_adam_eps0001_$(date +%Y%m%d_%H%M).log
+  # Multi GPU:    torchrun --nproc_per_node=2 src/train.py configs/arguments_run_nyu_wordepth_paper_exp3_effbatch24_adam_eps0001.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_wordepth_paper_exp3_effbatch24_adam_eps0001_$(date +%Y%m%d_%H%M).log
+# Tmux: tmux new -s train → source .venv/bin/activate → then (log in runs/ so run dir is not created in advance):
+#   torchrun --nproc_per_node=2 --master_port=29521 src/train.py configs/arguments_run_nyu_wordepth_paper_exp3_effbatch24_adam_eps0001.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_wordepth_paper_exp3_effbatch24_adam_eps0001_$(date +%Y%m%d_%H%M).log
+
+# 꼭 수정할 것! 
+# model_name, accumulation_steps, gpu_ids
+
+mode: train
+model_name: nyu_train_wordepth_paper_exp3_effbatch24_adam_eps0001
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+depth_scale: 6553.5
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 1
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-3
+num_threads: 16
+input_height: 480
+input_width: 640
+max_depth: 10
+do_random_rotate: true
+degree: 2.5
+log_directory: ./runs/
+
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+
+do_online_eval: true
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+eval_freq: 3000
+
+weight_kld: 1e-3
+alter_prob: 0.5
+
+use_amp: true
+cache_images: true
+gpu_ids: "5,6"
+
+store_freq_epochs: 2.0

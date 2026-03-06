@@ -1,0 +1,18 @@
+# WorDepth (non-baseline) NYU eval config. baseline_arch: false.
+# Used by scripts/eval_all_best_abs_rel_pptrue.sh for WorDepth / WorDepth+Relational runs.
+
+checkpoint_path: ./runs/nyu_train_wordepth_paper_exp2_effbatch24/model-45000-best_abs_rel_0.03969
+dataset: nyu
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_test_split.txt
+depth_scale: 6553.5
+input_height: 480
+input_width: 640
+max_depth: 10
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+post_process: true
+baseline_arch: false
+gpu_ids: "4"

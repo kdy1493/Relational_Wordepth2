@@ -202,6 +202,12 @@ def _make_parser() -> argparse.ArgumentParser:
         help="image-only baseline: do not load text features; feed zero text embeddings",
     )
 
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="use torch.compile(model) for faster forward/backward (PyTorch 2+); first epoch can be slower",
+    )
+
     # Relational supervision
     parser.add_argument("--use_relational_loss", action="store_true", help="enable relational depth supervision")
     parser.add_argument(
@@ -473,6 +479,17 @@ def main_worker(args: argparse.Namespace) -> None:
         baseline_arch=baseline_mode,
     )
     model.train()
+
+    # Optional: torch.compile for faster step (PyTorch 2+); first run compiles and can be slower.
+    # Use mode="default" to avoid CUDA graph overwrite errors with Swin (reduce-overhead can crash).
+    if getattr(args, "compile", False):
+        _compile = getattr(torch, "compile", None)
+        if _compile is not None:
+            model = _compile(model, mode="default")
+            if is_main:
+                logger.info("Model wrapped with torch.compile(mode='default')")
+        elif is_main:
+            logger.warning("--compile set but torch.compile not available (PyTorch 2+ required); ignoring")
 
     if is_main:
         nparams = sum(p.numel() for p in model.parameters())

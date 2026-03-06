@@ -4,7 +4,7 @@
 # 수정할 것: checkpoint_path, gpu_ids, post_process
 # Baseline 체크포인트 평가 시 baseline_arch: true 로 변경
 
-checkpoint_path: ./runs/nyu_train_baseline_exp1_effbatch24/model-36000-best_abs_rel_0.02982
+checkpoint_path: ./runs/nyu_train_wordepth_relational_exp3_effbatch24_stat_alpha10_lambda005_margin05/model-39000-best_abs_rel_0.03659
 dataset: nyu
 data_path_eval: ./data/nyu_v2_sync
 gt_path_eval: ./data/nyu_v2_sync
@@ -16,6 +16,6 @@ max_depth: 10
 min_depth_eval: 1e-3
 max_depth_eval: 10
 eigen_crop: true
-post_process: true
+post_process: false
 baseline_arch: true
-gpu_ids: "1"
+gpu_ids: "4"
