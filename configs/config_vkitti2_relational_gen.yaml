@@ -1,0 +1,73 @@
+# VKITTI2 Relational Annotations 생성 설정
+# ===========================================
+# SAM2 + YOLO-World + GT-Depth 기반
+#
+# 사용법:
+#   python src/relation_generation/generate_vkitti2_relations.py --config configs/config_vkitti2_relational_gen.yaml
+#
+# VKITTI2 다운로드: https://europe.naverlabs.com/research/computer-vision/proxy-virtual-worlds-vkitti-2/
+#   - vkitti_2.0.3_rgb.tar
+#   - vkitti_2.0.3_depth.tar
+
+# ============================================================================
+# VKITTI2 데이터셋 설정
+# ============================================================================
+dataset: vkitti2
+
+# VKITTI2 루트 경로 (압축 해제 후)
+vkitti2_root: ./data/vkitti_2.0.3
+
+# 출력 경로 (relations + masks)
+out_base_dir: ./data/vkitti2_relational
+
+# 처리할 Scene 목록 (null이면 전체)
+scenes: null
+# scenes:
+#   - Scene01
+#   - Scene02
+
+# 처리할 환경 조건 (clone이 기본)
+conditions:
+  - clone
+# conditions:
+#   - clone
+#   - fog
+#   - morning
+#   - overcast
+#   - rain
+#   - sunset
+
+# ============================================================================
+# SAM2 + YOLO-World 설정
+# ============================================================================
+sam_ckpt: ./sam2_b.pt
+yolo_ckpt: ./yolov8x-worldv2.pt
+
+sam_points_per_side: 8
+sam_min_region_area: 500
+yolo_conf_thresh: 0.5
+sam_max_objects: 20
+
+# ============================================================================
+# Relation 생성 설정
+# ============================================================================
+# statistical: μ, σ, M 기반 (논문 방식)
+# median: median depth + 임계값 + 공간 인접
+relation_style: statistical
+
+# 객체당 최대 relation 수
+max_rel_per_object: 5
+
+# 깊이 범위 (미터)
+min_depth: 0.1
+max_depth: 80.0
+
+# ============================================================================
+# 기타
+# ============================================================================
+device: cuda:0
+
+# 디버그 모드 (시각화 저장)
+debug: false
+visualize: false
+

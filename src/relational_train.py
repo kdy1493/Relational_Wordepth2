@@ -41,6 +41,10 @@ from dataloaders.nyu_relational_dataloader import (
     create_nyu_relational_dataloader,
     preload_relations_cache,
 )
+from dataloaders.vkitti2_relational_dataloader import (
+    create_vkitti2_dataloader,
+    VKITTI2_RELATIONS_CACHE,
+)
 from networks.relational_depth_loss import RelationalDepthLoss
 
 try:
@@ -300,6 +304,23 @@ def _make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable verbose debugging for relational annotations",
     )
+
+    # VKITTI2 specific arguments
+    parser.add_argument("--vkitti2_data_path", type=str, default=None, help="VKITTI2 root directory")
+    parser.add_argument("--vkitti2_relations_dir", type=str, default=None, help="VKITTI2 relations directory")
+    parser.add_argument("--vkitti2_caption_cache", type=str, default=None, help="VKITTI2 caption/embedding cache")
+    parser.add_argument("--vkitti2_scenes", type=str, nargs="+", default=None, help="VKITTI2 scenes to use")
+    parser.add_argument(
+        "--vkitti2_conditions",
+        type=str,
+        nargs="+",
+        default=["clone"],
+        help="VKITTI2 conditions",
+    )
+    parser.add_argument("--vkitti2_input_height", type=int, default=352, help="VKITTI2 input height")
+    parser.add_argument("--vkitti2_input_width", type=int, default=704, help="VKITTI2 input width")
+    parser.add_argument("--vkitti2_max_depth", type=float, default=80.0, help="VKITTI2 max depth (meters)")
+    parser.add_argument("--vkitti2_min_depth", type=float, default=0.1, help="VKITTI2 min depth (meters)")
 
     return parser
 
@@ -575,32 +596,58 @@ def main_worker(args: argparse.Namespace) -> None:
 
     # Data
     text_feat_cache: Optional[Dict[str, torch.Tensor]]
+    vkitti2_text_embeddings: Optional[Dict[str, np.ndarray]] = None
+
     if baseline_mode:
         text_feat_cache = None
         if is_main:
             logger.info("Baseline mode enabled: baseline_arch (Swin-L + depth decoder only), no text path.")
+    elif args.dataset == "vkitti2":
+        # VKITTI2: caption cache에서 embedding 로드
+        text_feat_cache = None
+        caption_cache_dir = getattr(args, "vkitti2_caption_cache", None)
+        if caption_cache_dir:
+            emb_path = os.path.join(caption_cache_dir, "vkitti2_embeddings.npz")
+            if os.path.exists(emb_path):
+                vkitti2_text_embeddings = dict(np.load(emb_path))
+                if is_main:
+                    logger.info("Loaded %d VKITTI2 text embeddings from %s", len(vkitti2_text_embeddings), emb_path)
+            else:
+                if is_main:
+                    logger.warning("VKITTI2 embeddings not found: %s", emb_path)
     else:
         text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
 
     if use_relational:
-        if args.relations_dir_train is None:
-            raise ValueError("--use_relational_loss is set but --relations_dir_train is None")
-        # Preload relations JSON into memory so DataLoader workers avoid repeated disk I/O (fork inherits cache on Linux).
-        preload_relations_cache(args.relations_dir_train, args.filenames_file)
-        if is_main:
-            logger.info("Relations cache preloaded for faster data loading.")
-        dataloader = create_nyu_relational_dataloader(args, "train", use_ddp=use_ddp)
+        if args.dataset == "vkitti2":
+            # VKITTI2 데이터셋 사용
+            if is_main:
+                logger.info("Using VKITTI2 dataset with relational loss")
+            dataloader = create_vkitti2_dataloader(args, "train", use_ddp=use_ddp)
+        else:
+            # NYU 데이터셋 (기존)
+            if args.relations_dir_train is None:
+                raise ValueError("--use_relational_loss is set but --relations_dir_train is None")
+            # Preload relations JSON into memory so DataLoader workers avoid repeated disk I/O (fork inherits cache on Linux).
+            preload_relations_cache(args.relations_dir_train, args.filenames_file)
+            if is_main:
+                logger.info("Relations cache preloaded for faster data loading.")
+            dataloader = create_nyu_relational_dataloader(args, "train", use_ddp=use_ddp)
     else:
         from dataloaders.dataloader import NewDataLoader  # imported lazily to avoid circular issues
         dataloader = NewDataLoader(args, "train")
 
     dataloader_eval = None
-    if getattr(args, "do_online_eval", False) and getattr(args, "filenames_file_eval", None) and os.path.isfile(args.filenames_file_eval):
-        if use_relational and args.relations_dir_eval is not None:
-            dataloader_eval = create_nyu_relational_dataloader(args, "online_eval", use_ddp=False)
-        else:
-            from dataloaders.dataloader import NewDataLoader  # noqa: E402
-            dataloader_eval = NewDataLoader(args, "online_eval")
+    if getattr(args, "do_online_eval", False):
+        if args.dataset == "vkitti2":
+            # VKITTI2 eval dataloader
+            dataloader_eval = create_vkitti2_dataloader(args, "online_eval", use_ddp=False)
+        elif getattr(args, "filenames_file_eval", None) and os.path.isfile(args.filenames_file_eval):
+            if use_relational and args.relations_dir_eval is not None:
+                dataloader_eval = create_nyu_relational_dataloader(args, "online_eval", use_ddp=False)
+            else:
+                from dataloaders.dataloader import NewDataLoader  # noqa: E402
+                dataloader_eval = NewDataLoader(args, "online_eval")
 
     if is_main and getattr(args, "do_online_eval", False):
         logger.info("Online eval every %d steps; best models saved per metric.", args.eval_freq)
@@ -658,6 +705,18 @@ def main_worker(args: argparse.Namespace) -> None:
             if baseline_mode:
                 batch_size = image.size(0)
                 text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+            elif args.dataset == "vkitti2":
+                # VKITTI2: dataloader에서 text_embedding 제공 (768D CLIP -> 1024D 변환 필요)
+                if "text_embedding" in sample_batched:
+                    text_emb = sample_batched["text_embedding"].cuda(non_blocking=True)  # [B, 768]
+                    # CLIP embedding (768) -> WorDepth text input (1024)로 패딩
+                    batch_size = text_emb.size(0)
+                    text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+                    text_feature_list[:, :768] = text_emb
+                else:
+                    # Fallback: zero embedding
+                    batch_size = image.size(0)
+                    text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
             else:
                 text_list: List[torch.Tensor] = []
                 for i in range(len(sample_batched["sample_path"])):
@@ -811,7 +870,9 @@ def main_worker(args: argparse.Namespace) -> None:
                     if ema is not None:
                         periodic_ckpt["ema"] = ema.state_dict()
                     torch.save(periodic_ckpt, os.path.join(out_path, f"model-{global_step}"))
-                    logger.info("Saved periodic checkpoint at step %d", global_step)
+                    # Always keep a single "latest" checkpoint (overwrite) for easy resume
+                    torch.save(periodic_ckpt, os.path.join(out_path, "model-latest"))
+                    logger.info("Saved periodic checkpoint at step %d (and model-latest)", global_step)
 
                 # Online eval
                 if (
@@ -859,6 +920,14 @@ def main_worker(args: argparse.Namespace) -> None:
             model_just_loaded = False
 
         epoch += 1
+
+    # Save final state as model-latest so it is always the most recent
+    if is_main and out_path:
+        final_ckpt = {"global_step": global_step, "model": model.state_dict()}
+        if ema is not None:
+            final_ckpt["ema"] = ema.state_dict()
+        torch.save(final_ckpt, os.path.join(out_path, "model-latest"))
+        logger.info("Saved final model-latest at step %d", global_step)
 
 
 def _save_best_ckpt(

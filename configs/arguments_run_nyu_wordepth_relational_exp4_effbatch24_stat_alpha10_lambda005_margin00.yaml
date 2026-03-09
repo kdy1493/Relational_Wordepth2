@@ -29,7 +29,7 @@ depth_scale: 6553.5
 max_depth: 10
 batch_size: 12
 num_epochs: 50
-accumulation_steps: 1
+accumulation_steps: 2
 learning_rate: 3e-5
 end_learning_rate: 1e-5
 lr_schedule: cosine
@@ -62,7 +62,7 @@ alter_prob: 0.5
 # 실행환경
 use_amp: true
 cache_images: true
-gpu_ids: "3,4"
+gpu_ids: "1"
 
 
 # Relational (statistical, alpha=1.0, lambda=0.05, margin=0.0)
@@ -76,4 +76,4 @@ use_dense_depth: true
 relations_dir_train: ./data/nyu_relational/statistical_train
 
 store_freq_epochs: 2.0
-compile: false
+compile: true

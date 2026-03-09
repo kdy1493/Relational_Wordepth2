@@ -1,0 +1,67 @@
+# Baseline Swin-L — 논문/공식 설정 최대한 일치 (Table 1 Baseline 0.098 재현 목적)
+#
+# 논문: "The baseline method is to directly train a Swin-L image encoder and the depth decoder
+#       without the help of language prior." (Table 1: Abs Rel 0.098, δ1 0.910, RMSE 0.351)
+# 공식 repo: configs/arguments_run_nyu.txt, README "legacy" = paper version (skip connections ON)
+#
+# 우리와의 차이 요약:
+# - legacy: true  → 디코더에 skip connection 사용 (논문/legacy). false면 스킵 제로라 더 잘 나올 수 있음.
+# - adam_eps: 1e-3 → 공식 config 값. 우리 기본 1e-6보다 크게 두면 최적화 궤적이 달라질 수 있음.
+
+#
+# 실행 (repo root):
+#   python src/train.py configs/arguments_run_nyu_baseline_exp3_effbatch24_adameps0001_nolegacy.yaml 2>&1 | tee runs/train_nyu_train_baseline_exp3_effbatch24_adameps0001_nolegacy_$(date +%Y%m%d_%H%M).log
+#   torchrun --nproc_per_node=2 src/train.py configs/arguments_run_nyu_baseline_exp3_effbatch24_adameps0001_nolegacy.yaml --use_ddp 2>&1 | tee runs/train_nyu_train_baseline_exp3_effbatch24_adameps0001_nolegacy_$(date +%Y%m%d_%H%M).log
+
+mode: train
+model_name: nyu_train_baseline_exp3_effbatch24_adameps0001_nolegacy
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+
+baseline_mode: true
+
+# 논문 Sec 4: Adam, no weight decay, lr 3e-5 → 1e-5 cosine, 50 epochs, γ=0.85
+depth_scale: 6553.5
+max_depth: 10
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 1
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-3
+num_threads: 16
+input_height: 480
+input_width: 640
+do_random_rotate: true
+degree: 2.5
+
+# 논문/공식: eigen_crop 사용. 평가 시 post_process는 논문 표에 명시 없음 → 두 경우 모두 해보기
+log_directory: ./runs/
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+do_online_eval: true
+eval_freq: 3000
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+
+weight_kld: 0.0
+alter_prob: 0.0
+
+# 논문 baseline = 같은 디코더에 skip connection 사용 (README: paper = legacy)
+legacy: false
+
+use_amp: true
+cache_images: true
+gpu_ids: "3,4"
+
+store_freq_epochs: 2.0
+compile: false

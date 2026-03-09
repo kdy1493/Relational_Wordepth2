@@ -244,10 +244,13 @@ def run_eval_only() -> None:
     except TypeError:
         ckpt = torch.load(args.checkpoint_path, map_location="cpu")
     model_state = ckpt["model"]
-    # Checkpoint may be from DataParallel/DDP (keys like "module.backbone....");
-    # load into unwrapped model first, so strip "module." prefix if present.
+    # Checkpoint may be from DataParallel/DDP (keys like "module.backbone....")
+    # or from torch.compile (keys like "module._orig_mod.backbone...." or "_orig_mod.backbone....").
+    # Load into unwrapped model, so strip these prefixes if present.
     if any(k.startswith("module.") for k in model_state.keys()):
         model_state = {k.replace("module.", "", 1): v for k, v in model_state.items()}
+    if any(k.startswith("_orig_mod.") for k in model_state.keys()):
+        model_state = {k.replace("_orig_mod.", "", 1): v for k, v in model_state.items()}
     model.load_state_dict(model_state, strict=not baseline_arch)
     if device.type == "cuda":
         model = torch.nn.DataParallel(model)

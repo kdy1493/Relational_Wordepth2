@@ -22,8 +22,10 @@ for d in runs/nyu_train_*/; do
 done
 
 # Run eval for each (baseline runs use baseline config, else wordepth config)
+# On eval failure we continue so other runs still run; failed runs are listed at the end.
 idx=0
 total=$(echo "$LIST" | grep -c . || true)
+FAILED=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   run_dir="${line%%|*}"
@@ -31,22 +33,25 @@ while IFS= read -r line; do
   name=$(basename "${run_dir%/}")
   idx=$((idx + 1))
   echo "[$idx/$total] $name"
+  # Free GPU memory between runs to avoid CUDA "unspecified launch failure" after many evals
+  python3 -c "import torch; torch.cuda.empty_cache(); torch.cuda.synchronize()" 2>/dev/null || true
   if [[ "$name" == *"nyu_train_baseline"* ]]; then
-    python src/eval.py "$EVAL_CONFIG_BASELINE" --checkpoint_path "$ckpt" --post_process
+    python3 src/eval.py "$EVAL_CONFIG_BASELINE" --checkpoint_path "$ckpt" --post_process || { FAILED="$FAILED $name"; echo "[WARN] Eval failed: $name"; }
   else
-    python src/eval.py "$EVAL_CONFIG_WORDEPTH" --checkpoint_path "$ckpt" --post_process
+    python3 src/eval.py "$EVAL_CONFIG_WORDEPTH" --checkpoint_path "$ckpt" --post_process || { FAILED="$FAILED $name"; echo "[WARN] Eval failed: $name"; }
   fi
 done <<< "$LIST"
+[ -n "$FAILED" ] && echo "=== Failed runs (re-run manually if needed):$FAILED"
 
 echo ""
 echo "=== Collecting results and printing table ==="
 
 # Collect results: read each eval_results_*best_abs_rel*.json (now with post_process=true)
 # and output a markdown table. Use run name and short param summary.
-printf '%s\n' "| 이름 | 주요 파라미터 (변경된 것 위주) | Eval result (test, post_process=true) |"
-printf '%s\n' "|------|-------------------------------|---------------------------------------|"
+echo "| 이름 | 주요 파라미터 (변경된 것 위주) | Eval result (test, post_process=true) |"
+echo "|------|-------------------------------|---------------------------------------|"
 
-for d in runs/nyu_train_*/; do
+for d in $(ls -d runs/nyu_train_*/ 2>/dev/null | sort); do
   json=$(ls "$d"eval_results_*best_abs_rel*.json 2>/dev/null | head -1)
   [ -z "$json" ] && continue
   name=$(basename "${d%/}")
@@ -56,16 +61,19 @@ for d in runs/nyu_train_*/; do
   d1=$(grep -o '"d1": [0-9.]*' "$json" | head -1 | sed 's/"d1": //')
   rms=$(grep -o '"rms": [0-9.]*' "$json" | head -1 | sed 's/"rms": //')
   pp=$(grep -o '"post_process": [a-z]*' "$json" | head -1 | sed 's/"post_process": //')
-  [ -z "$abs_rel" ] && abs_rel="-"
-  [ -z "$silog" ] && silog="-"
-  [ -z "$d1" ] && d1="-"
-  [ -z "$rms" ] && rms="-"
-  metrics="abs_rel $abs_rel · silog $silog · δ1 $d1 · rms $rms (pp=$pp)"
+  [ -z "$abs_rel" ] && abs_rel="-"; [ -z "$silog" ] && silog="-"; [ -z "$d1" ] && d1="-"; [ -z "$rms" ] && rms="-"
+  # Round to 4 decimals for compact one-line table
+  [ "$abs_rel" != "-" ] && abs_rel=$(printf '%.4f' "$abs_rel")
+  [ "$silog" != "-" ] && silog=$(printf '%.4f' "$silog")
+  [ "$d1" != "-" ] && d1=$(printf '%.4f' "$d1")
+  [ "$rms" != "-" ] && rms=$(printf '%.4f' "$rms")
+  metrics="abs_rel=$abs_rel silog=$silog δ1=$d1 rms=$rms (pp=$pp)"
   # Short param summary per run (change-focused)
   case "$name" in
     nyu_train_baseline_exp0_effbatch96) params="baseline, eff_batch 96 (accum=4), adam_eps=1e-6" ;;
     nyu_train_baseline_exp1_effbatch24) params="baseline, eff_batch 24 (accum=1), adam_eps=1e-6" ;;
     nyu_train_baseline_exp2_effbatch24_adameps0001) params="baseline, eff_batch 24, adam_eps=1e-3, legacy=true" ;;
+    nyu_train_baseline_exp3_effbatch24_adameps0001_nolegacy3) params="baseline, eff_batch 24, adam_eps=1e-3, no legacy3" ;;
     nyu_train_wordepth_paper_exp0_alter001) params="WorDepth, alter_prob=0.01" ;;
     nyu_train_wordepth_paper_exp1_alter05) params="WorDepth, alter_prob=0.5" ;;
     nyu_train_wordepth_paper_exp2_effbatch24) params="WorDepth, eff_batch 24, alter_prob=0.5" ;;

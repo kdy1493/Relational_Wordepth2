@@ -2,9 +2,9 @@
 # Run:  python src/eval.py configs/arguments_eval_nyu_paper.yaml
 
 # 수정할 것: checkpoint_path, gpu_ids, post_process
-# Baseline 체크포인트 평가 시 baseline_arch: true 로 변경
+# Baseline 전용 config (eval_all_best_abs_rel_pptrue.sh에서 baseline run에 사용). WorDepth 체크포인트 평가 시 arguments_eval_nyu_all_wordepth.yaml 사용.
 
-checkpoint_path: ./runs/nyu_train_wordepth_relational_exp3_effbatch24_stat_alpha10_lambda005_margin05/model-39000-best_abs_rel_0.03659
+checkpoint_path: ./runs/nyu_train_wordepth_relational_exp4_effbatch24_stat_alpha10_lambda005_margin003/model-36000-best_sq_rel_0.02107
 dataset: nyu
 data_path_eval: ./data/nyu_v2_sync
 gt_path_eval: ./data/nyu_v2_sync
@@ -16,6 +16,6 @@ max_depth: 10
 min_depth_eval: 1e-3
 max_depth_eval: 10
 eigen_crop: true
-post_process: false
+post_process: true
 baseline_arch: true
-gpu_ids: "4"
+gpu_ids: "0"
