@@ -85,6 +85,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_kld", type=float, default=1e-3)
     parser.add_argument("--alter_prob", type=float, default=0.5)
     parser.add_argument("--legacy", action="store_true")
+    parser.add_argument("--baseline_arch", action="store_true", help="baseline model (no text); use with baseline checkpoint")
     parser.add_argument("--pretrain", type=str, default=None)
     parser.add_argument("--do_kb_crop", action="store_true")
     parser.add_argument("--eigen_crop", action="store_true")
@@ -299,6 +300,7 @@ def main() -> None:
     if any(k.startswith("module.") for k in model_state.keys()):
         model_state = {k.replace("module.", "", 1): v for k, v in model_state.items()}
 
+    baseline_arch = getattr(args, "baseline_arch", False)
     model = WorDepth(
         pretrained=args.pretrain,
         max_depth=args.max_depth,
@@ -307,8 +309,9 @@ def main() -> None:
         weight_kld=args.weight_kld,
         alter_prob=args.alter_prob,
         legacy=args.legacy,
+        baseline_arch=baseline_arch,
     )
-    load_ok = model.load_state_dict(model_state, strict=False)
+    load_ok = model.load_state_dict(model_state, strict=not baseline_arch)
     if load_ok.missing_keys or load_ok.unexpected_keys:
         logger.warning(
             "Checkpoint has key mismatches (missing: %d, unexpected: %d). Visualization may be wrong if backbone differs.",
@@ -324,21 +327,24 @@ def main() -> None:
     all_pred: List[np.ndarray] = []
 
     for image_path, depth_path, sample_key in samples:
-        # Try test first (for test split), then train
-        pt_path = _text_feat_pt_path(os.path.join(text_feat_base, "test"), sample_key)
-        if pt_path is None:
-            pt_path = _text_feat_pt_path(os.path.join(text_feat_base, "train"), sample_key)
-        if pt_path is None:
-            logger.warning("Text feature not found for %s; skipping sample.", sample_key)
-            continue
-        text_feat = torch.load(pt_path, map_location=device)
-        if isinstance(text_feat, torch.Tensor):
-            if text_feat.dim() == 1:
-                text_feat = text_feat.unsqueeze(0)  # [1024] -> [1, 1024]
+        # Baseline: zero text; else load text feature
+        if baseline_arch:
+            text_feat = torch.zeros(1, 1024, device=device, dtype=torch.float32)
         else:
-            text_feat = torch.from_numpy(np.array(text_feat)).float().to(device)
-            if text_feat.dim() == 1:
-                text_feat = text_feat.unsqueeze(0)
+            pt_path = _text_feat_pt_path(os.path.join(text_feat_base, "test"), sample_key)
+            if pt_path is None:
+                pt_path = _text_feat_pt_path(os.path.join(text_feat_base, "train"), sample_key)
+            if pt_path is None:
+                logger.warning("Text feature not found for %s; skipping sample.", sample_key)
+                continue
+            text_feat = torch.load(pt_path, map_location=device)
+            if isinstance(text_feat, torch.Tensor):
+                if text_feat.dim() == 1:
+                    text_feat = text_feat.unsqueeze(0)  # [1024] -> [1, 1024]
+            else:
+                text_feat = torch.from_numpy(np.array(text_feat)).float().to(device)
+                if text_feat.dim() == 1:
+                    text_feat = text_feat.unsqueeze(0)
 
         tensor, rgb_display = _load_and_preprocess_image(
             image_path,
