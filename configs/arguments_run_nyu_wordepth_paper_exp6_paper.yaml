@@ -1,0 +1,63 @@
+# WorDepth NYU — dataloader 정합 + 논문 재현 설정 (legacy + alter_prob 0.01)
+#
+# DataLoadPreprocess NYU train: relational과 맞춤 (RGB–depth 일치, resize, rotate만).
+# 논문/README: legacy = skip connection 유지, alter_prob 낮게 = 대부분 이미지 브랜치.
+# GitHub 수락 후 권장(0.5, no skip)과는 다름 → 논문 표/체크포인트 재현용으로만 사용.
+#
+# Eval 시 반드시 같은 전제:
+#   python src/eval.py ... --legacy  (체크포인트가 legacy로 학습된 경우)
+#
+# Single GPU:
+#   python src/train.py configs/arguments_run_nyu_wordepth_paper_exp6_paper.yaml 2>&1 | tee runs/train_nyu_wordepth_paper_exp6_paper_$(date +%Y%m%d_%H%M).log
+# Multi GPU:
+#   torchrun --nproc_per_node=2 --master_port=29521 src/train.py configs/arguments_run_nyu_wordepth_paper_exp6_paper.yaml --use_ddp 2>&1 | tee runs/train_nyu_wordepth_paper_exp6_paper_$(date +%Y%m%d_%H%M).log
+#
+# 꼭 수정: gpu_ids
+
+mode: train
+model_name: nyu_train_wordepth_paper_exp6_paper
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+depth_scale: 6553.5
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 2
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-6
+num_threads: 16
+input_height: 480
+input_width: 640
+max_depth: 10
+do_random_rotate: true
+degree: 2.5
+log_directory: ./runs/
+
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+
+do_online_eval: true
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+eval_freq: 3000
+
+weight_kld: 1e-3
+# 논문 쪽: 학습 시 대부분 이미지 경로(ε 예측). GitHub 최신 권장은 0.5.
+alter_prob: 0.01
+# README paper = skip connection ON. eval 시 --legacy 필요.
+legacy: true
+
+use_amp: true
+cache_images: true
+gpu_ids: "1"
+
+store_freq_epochs: 2.0

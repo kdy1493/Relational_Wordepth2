@@ -45,8 +45,6 @@ from pred_visualize import (
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-COLUMN_LABELS = ["Input", "GT", "Baseline", "WorDepth", "WorDepth+Rel"]
-
 
 def _load_model(
     checkpoint_path: str,
@@ -91,6 +89,79 @@ def _pad_to_width(img: np.ndarray, target_w: int) -> np.ndarray:
     return np.concatenate([img, pad], axis=1)
 
 
+def _load_color_masks_for_sample(
+    sample_key: str,
+    relations_dir: str,
+    target_h: int,
+    target_w: int,
+) -> Optional[np.ndarray]:
+    """
+    Load YOLO+SAM object masks for a NYU sample and convert to a colored mask image.
+
+    Expects *_masks.npy produced by generate_relational_annotations.py under relations_dir,
+    with the same path convention as nyu_relational_dataloader:
+      relations_dir/scene_name/rgb_xxxxx_masks.npy
+    where sample_key may be prefixed with train/ or test/.
+    """
+    if not relations_dir:
+        return None
+
+    rgb_file_unix = sample_key.replace(os.sep, "/")
+    scene_name = os.path.dirname(rgb_file_unix)
+    rgb_basename = os.path.basename(rgb_file_unix).replace(".jpg", "").replace(".png", "")
+
+    first_seg = scene_name.split("/", 1)[0]
+    if first_seg in ("train", "test"):
+        scene_name = scene_name.split("/", 1)[1] if "/" in scene_name else ""
+
+    mask_path = os.path.join(relations_dir, scene_name, f"{rgb_basename}_masks.npy")
+    if not os.path.isfile(mask_path):
+        return None
+
+    try:
+        masks_np = np.load(mask_path)  # (N, H, W)
+    except Exception:
+        return None
+    if masks_np.ndim != 3 or masks_np.shape[0] == 0:
+        return None
+
+    masks_np = (masks_np > 0.5).astype(np.uint8)
+    n_obj, h, w = masks_np.shape
+    if (h, w) != (target_h, target_w):
+        resized = []
+        for k in range(n_obj):
+            resized.append(
+                cv2.resize(
+                    masks_np[k],
+                    (target_w, target_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            )
+        masks_np = np.stack(resized, axis=0)
+
+    # Simple fixed color palette
+    palette = np.array(
+        [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [255, 0, 255],
+            [0, 255, 255],
+            [255, 128, 0],
+            [128, 0, 255],
+        ],
+        dtype=np.uint8,
+    )
+    color = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    for idx in range(n_obj):
+        m = masks_np[idx] > 0
+        if not np.any(m):
+            continue
+        color[m] = palette[idx % len(palette)]
+    return color
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize Baseline vs WorDepth vs WorDepth+Rel", fromfile_prefix_chars="@")
     parser.convert_arg_line_to_args = convert_arg_line_to_args
@@ -122,6 +193,22 @@ def main() -> None:
     parser.add_argument("--do_kb_crop", action="store_true")
     parser.add_argument("--eigen_crop", action="store_true")
     parser.add_argument("--gpu_ids", type=str, default=None)
+    parser.add_argument(
+        "--relations_dir_eval",
+        type=str,
+        default="",
+        help="Optional directory containing *_masks.npy from YOLO+SAM (NYU relational annotations).",
+    )
+    parser.add_argument(
+        "--show_masks",
+        action="store_true",
+        help="If set, show YOLO+SAM object masks as an extra column (requires relations_dir_eval).",
+    )
+    parser.add_argument(
+        "--three_models_same_arch",
+        action="store_true",
+        help="If set, load ckpt_baseline as WorDepth too (baseline_arch=False). Use when comparing three WorDepth/WorDepth+Rel checkpoints.",
+    )
     # Ignored (from eval YAML when using @config.yaml)
     parser.add_argument("--checkpoint_path", type=str, default="", help="ignored; we use --ckpt_*")
     parser.add_argument("--post_process", action="store_true", help="ignored")
@@ -166,7 +253,8 @@ def main() -> None:
     logger.info("Randomly selected %d samples (seed=%s).", len(samples), args.seed)
 
     logger.info("Loading three models...")
-    model_baseline = _load_model(args.ckpt_baseline, True, args, device)
+    baseline_arch_first = not getattr(args, "three_models_same_arch", False)
+    model_baseline = _load_model(args.ckpt_baseline, baseline_arch_first, args, device)
     model_wordepth = _load_model(args.ckpt_wordepth, False, args, device)
     model_relational = _load_model(args.ckpt_relational, False, args, device)
 
@@ -176,6 +264,7 @@ def main() -> None:
     all_pred_b: List[np.ndarray] = []
     all_pred_w: List[np.ndarray] = []
     all_pred_r: List[np.ndarray] = []
+    all_masks: List[np.ndarray] = []
 
     for image_path, depth_path, sample_key in samples:
         pt_path = _text_feat_pt_path(os.path.join(text_feat_base, "test"), sample_key)
@@ -186,13 +275,24 @@ def main() -> None:
             continue
 
         tensor, rgb_display = _load_and_preprocess_image(
-            image_path, args.input_height, args.input_width, args.do_kb_crop
+            image_path, args.input_height, args.input_width, args.do_kb_crop,
+            dataset=args.dataset
         )
         tensor = tensor.to(device)
         gt = _load_gt_depth(
             depth_path, args.dataset, args.do_kb_crop,
             args.input_height, args.input_width, args.depth_scale
         )
+
+        # Optional YOLO+SAM masks (NYU relational annotations)
+        mask_color: Optional[np.ndarray] = None
+        if args.show_masks and args.relations_dir_eval and args.dataset == "nyu":
+            mask_color = _load_color_masks_for_sample(
+                sample_key,
+                args.relations_dir_eval,
+                args.input_height,
+                args.input_width,
+            )
 
         # Text: baseline = zeros; others = load
         text_b = torch.zeros(1, 1024, device=device, dtype=torch.float32)
@@ -221,6 +321,10 @@ def main() -> None:
         all_pred_b.append(to_np(pred_b))
         all_pred_w.append(to_np(pred_w))
         all_pred_r.append(to_np(pred_r))
+        if args.show_masks:
+            if mask_color is None:
+                mask_color = np.zeros_like(rgb_display)
+            all_masks.append(mask_color)
 
     if not all_rgb:
         logger.error("No samples processed.")
@@ -256,7 +360,8 @@ def main() -> None:
         vmin, vmax = DEPTH_VIS_VMIN, DEPTH_VIS_VMAX
 
     cell_h = args.cell_height
-    ncols = 5
+    use_masks = bool(args.show_masks and all_masks)
+    ncols = 6 if use_masks else 5
     rows = []
     for i in range(len(all_rgb)):
         rgb_cell = _resize_for_cell(all_rgb[i], cell_h)
@@ -269,18 +374,27 @@ def main() -> None:
         pred_b_cell = _resize_for_cell(pred_b_color, cell_h)
         pred_w_cell = _resize_for_cell(pred_w_color, cell_h)
         pred_r_cell = _resize_for_cell(pred_r_color, cell_h)
+        if use_masks:
+            mask_cell = _resize_for_cell(all_masks[i], cell_h)
 
         w_max = max(
             rgb_cell.shape[1], gt_cell.shape[1],
             pred_b_cell.shape[1], pred_w_cell.shape[1], pred_r_cell.shape[1],
+            mask_cell.shape[1] if use_masks else 0,
         )
         rgb_cell = _pad_to_width(rgb_cell, w_max)
         gt_cell = _pad_to_width(gt_cell, w_max)
+        if use_masks:
+            mask_cell = _pad_to_width(mask_cell, w_max)
         pred_b_cell = _pad_to_width(pred_b_cell, w_max)
         pred_w_cell = _pad_to_width(pred_w_cell, w_max)
         pred_r_cell = _pad_to_width(pred_r_cell, w_max)
 
-        row = np.concatenate([rgb_cell, gt_cell, pred_b_cell, pred_w_cell, pred_r_cell], axis=1)
+        cells = [rgb_cell, gt_cell]
+        if use_masks:
+            cells.append(mask_cell)
+        cells.extend([pred_b_cell, pred_w_cell, pred_r_cell])
+        row = np.concatenate(cells, axis=1)
         rows.append(row)
 
     fig_img = np.concatenate(rows, axis=0)
@@ -290,7 +404,11 @@ def main() -> None:
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.55
     thickness = 2
-    for c, label in enumerate(COLUMN_LABELS):
+    if use_masks:
+        column_labels = ["Input", "GT", "Masks (YOLO+SAM)", "Baseline", "WorDepth", "WorDepth+Rel"]
+    else:
+        column_labels = ["Input", "GT", "Baseline", "WorDepth", "WorDepth+Rel"]
+    for c, label in enumerate(column_labels):
         (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
         x = c * cell_w + (cell_w - tw) // 2
         y = 22

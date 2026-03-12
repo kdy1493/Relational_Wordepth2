@@ -18,4 +18,4 @@ max_depth_eval: 10
 eigen_crop: true
 post_process: false
 baseline_arch: true
-gpu_ids: "6"
+gpu_ids: "4"

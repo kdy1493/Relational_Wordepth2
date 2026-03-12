@@ -162,6 +162,7 @@ def _load_and_preprocess_image(
     input_height: int,
     input_width: int,
     do_kb_crop: bool,
+    dataset: str = "nyu",
 ) -> Tuple[torch.Tensor, np.ndarray]:
     """Load RGB, preprocess for model (resize, normalize), return tensor and RGB for display (0–255)."""
     image_cv = cv2.imread(image_path, cv2.IMREAD_COLOR)
@@ -170,10 +171,15 @@ def _load_and_preprocess_image(
     image = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
     if do_kb_crop:
+        # KITTI crop
         h, w = image.shape[:2]
         top = int(h - 352)
         left = int((w - 1216) / 2)
         image = image[top : top + 352, left : left + 1216, :]
+    elif dataset == "nyu":
+        # NYU crop: remove invalid border regions (same as training)
+        # Original: 640x480 -> crop to (43:608, 45:472) = 565x427
+        image = image[45:472, 43:608, :]
 
     if image.shape[0] != input_height or image.shape[1] != input_width:
         image = cv2.resize(image, (input_width, input_height), interpolation=cv2.INTER_LINEAR)
@@ -204,10 +210,14 @@ def _load_gt_depth(
         depth = depth / 256.0
 
     if do_kb_crop:
+        # KITTI crop
         h, w = depth.shape[:2]
         top = int(h - 352)
         left = int((w - 1216) / 2)
         depth = depth[top : top + 352, left : left + 1216]
+    elif dataset == "nyu":
+        # NYU crop: remove invalid border regions (same as training)
+        depth = depth[45:472, 43:608]
 
     if depth.shape[0] != input_height or depth.shape[1] != input_width:
         depth = cv2.resize(depth, (input_width, input_height), interpolation=cv2.INTER_NEAREST)
@@ -351,6 +361,7 @@ def main() -> None:
             args.input_height,
             args.input_width,
             args.do_kb_crop,
+            dataset=args.dataset,
         )
         tensor = tensor.to(device)
         gt = _load_gt_depth(

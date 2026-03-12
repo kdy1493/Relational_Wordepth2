@@ -1,0 +1,61 @@
+# WorDepth NYU — exp2 재학습용 (dataloader.py NYU 분기 수정 반영)
+#
+# DataLoadPreprocess NYU train 경로가 NYURelationalDataset(use_relational_loss=False)과 맞춰짐:
+#   - depth-only valid_mask / eigen crop 제거 → RGB–depth 공간 일치
+#   - 해상도 불일치 시 random_crop 대신 resize (bilinear/nearest)
+#   - NYU는 train_preprocess(flip/gamma) 없음 — rotate만 (relational과 동일)
+# 기존 exp2 체크포인트와 직접 비교 시 수치는 달라질 수 있음 (재학습 권장).
+#
+# GitHub 수락 후 권장: alter_prob 0.5, legacy 없음(skip 제거). 논문 재현은 exp5_dataloader_aligned_legacy_paper.yaml.
+#
+# Single GPU:
+#   python src/train.py configs/arguments_run_nyu_wordepth_paper_exp5_dataloader_aligned.yaml 2>&1 | tee runs/train_nyu_wordepth_paper_exp5_dataloader_aligned_$(date +%Y%m%d_%H%M).log
+# Multi GPU:
+#   torchrun --nproc_per_node=2 --master_port=29521 src/train.py configs/arguments_run_nyu_wordepth_paper_exp5_dataloader_aligned.yaml --use_ddp 2>&1 | tee runs/train_nyu_wordepth_paper_exp5_dataloader_aligned_$(date +%Y%m%d_%H%M).log
+#
+# 꼭 수정: gpu_ids
+
+mode: train
+model_name: nyu_train_wordepth_paper_exp5_dataloader_aligned
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+depth_scale: 6553.5
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 2
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-6
+num_threads: 16
+input_height: 480
+input_width: 640
+max_depth: 10
+do_random_rotate: true
+degree: 2.5
+log_directory: ./runs/
+
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+
+do_online_eval: true
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+eval_freq: 3000
+
+weight_kld: 1e-3
+alter_prob: 0.5
+
+use_amp: true
+cache_images: true
+gpu_ids: "1"
+
+store_freq_epochs: 2.0

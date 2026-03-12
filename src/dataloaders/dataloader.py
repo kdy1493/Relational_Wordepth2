@@ -146,17 +146,10 @@ class DataLoadPreprocess(Dataset):
                 depth_gt = depth_gt.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
                 image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
 
-            # To avoid blank boundaries due to pixel registration
-            if self.args.dataset == 'nyu':
-                if self.args.input_height == 480:
-                    depth_gt = np.array(depth_gt)
-                    valid_mask = np.zeros_like(depth_gt)
-                    valid_mask[45:472, 43:608] = 1
-                    depth_gt[valid_mask == 0] = 0
-                    depth_gt = Image.fromarray(depth_gt)
-                else:
-                    depth_gt = depth_gt.crop((43, 45, 608, 472))
-                    image = image.crop((43, 45, 608, 472))
+            # NYU: align with NYURelationalDataset when use_relational_loss=False — same load, no depth-only
+            # masking, no eigen crop. RGB and depth stay spatially matched; resize (not random_crop) below.
+            # Previously: valid_mask[45:472,43:608] zeroed depth only while image stayed 480x640, which
+            # caused RGB–depth mismatch and border artifacts in depth prediction.
 
             if self.args.do_random_rotate is True:
                 random_angle = (random.random() - 0.5) * 2 * self.args.degree
@@ -172,9 +165,26 @@ class DataLoadPreprocess(Dataset):
             else:
                 depth_gt = depth_gt / 256.0
 
-            if image.shape[0] != self.args.input_height or image.shape[1] != self.args.input_width:
-                image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
-            image, depth_gt = self.train_preprocess(image, depth_gt)
+            # NYU: match nyu_relational_dataloader — resize to input (bilinear / nearest), no random_crop;
+            # no train_preprocess (no random flip / gamma), only rotate above like relational.
+            if self.args.dataset == 'nyu':
+                if image.shape[0] != self.args.input_height or image.shape[1] != self.args.input_width:
+                    image = cv2.resize(
+                        image,
+                        (self.args.input_width, self.args.input_height),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    depth_gt = cv2.resize(
+                        depth_gt.squeeze(axis=2),
+                        (self.args.input_width, self.args.input_height),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    depth_gt = np.expand_dims(depth_gt, axis=2)
+                # relational NYURelationalDataset does not apply train_preprocess
+            else:
+                if image.shape[0] != self.args.input_height or image.shape[1] != self.args.input_width:
+                    image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
+                image, depth_gt = self.train_preprocess(image, depth_gt)
             sample = {'image': image, 'depth': depth_gt, 'focal': focal, "sample_path": sample_path}
 
         else:

@@ -47,6 +47,8 @@ Decoder: d_feat = mean + std * ε → Refine blocks → Up → OutConv → exp()
 | Rel margin tuning | `scripts/analyze_relation_gt_gaps.py` |
 | End-to-end pipeline | `scripts/run_train_then_eval.py` |
 
+**NYU train data (alignment):** `DataLoadPreprocess` NYU branch matches `NYURelationalDataset` when `use_relational_loss=False`: no depth-only boundary masking, no eigen crop; resize to `input_height×input_width` if needed (bilinear/nearest); no `train_preprocess` flip/augment (rotate only, same as relational). So *relational dataloader with rel turned off* and *train.py dataloader* are aligned for NYU.
+
 ## Commands
 
 ### Training

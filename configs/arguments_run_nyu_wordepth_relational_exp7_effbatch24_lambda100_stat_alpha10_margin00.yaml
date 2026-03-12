@@ -1,0 +1,67 @@
+# Relational WorDepth NYU — λ_rel = 1.0 (강한 relational 항)
+# - exp6(λ=0.02)와 동일 골자, rel_weight만 1.0으로 λ ablation 상한 확인용
+# - λ=1이면 base depth loss와 스케일이 비슷해질 수 있어 불안정할 수 있음 → 발산 시
+#   rel_weight 낮추거나 configs에 있는 rel_loss_normalize 옵션 검토
+#
+# Single GPU:
+#   python src/relational_train.py configs/arguments_run_nyu_wordepth_relational_exp7_effbatch24_lambda100_stat_alpha10_margin00.yaml 2>&1 | tee runs/train_nyu_wordepth_relational_exp7_effbatch24_lambda100_stat_alpha10_margin00_$(date +%Y%m%d_%H%M).log
+# Multi GPU:
+#   torchrun --nproc_per_node=2 --master_port=29521 src/relational_train.py configs/arguments_run_nyu_wordepth_relational_exp7_effbatch24_lambda100_stat_alpha10_margin00.yaml --use_ddp 2>&1 | tee runs/train_nyu_wordepth_relational_exp7_effbatch24_lambda100_stat_alpha10_margin00_$(date +%Y%m%d_%H%M).log
+#
+# 꼭 수정: gpu_ids
+
+mode: train
+model_name: nyu_train_wordepth_relational_exp7_effbatch24_lambda100_stat_alpha10_margin00
+dataset: nyu
+data_path: ./data/nyu_v2_sync
+gt_path: ./data/nyu_v2_sync
+filenames_file: ./data_splits/nyudepthv2_train_split.txt
+pretrain: ./swin_large_patch4_window12_384_22k.pth
+
+depth_scale: 6553.5
+max_depth: 10
+batch_size: 12
+num_epochs: 50
+accumulation_steps: 1
+learning_rate: 3e-5
+end_learning_rate: 1e-5
+lr_schedule: cosine
+weight_decay: 0.0
+adam_eps: 1e-6
+num_threads: 16
+input_height: 480
+input_width: 640
+do_random_rotate: true
+degree: 2.5
+
+log_directory: ./runs/
+log_freq: 50
+min_depth_eval: 1e-3
+max_depth_eval: 10
+eigen_crop: true
+do_online_eval: true
+eval_freq: 3000
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_val_split.txt
+filenames_file_test: ./data_splits/nyudepthv2_test_split.txt
+
+weight_kld: 1e-3
+alter_prob: 0.5
+
+use_amp: true
+cache_images: true
+gpu_ids: "5,6"
+
+# Relational — λ = 1.0
+use_relational_loss: true
+rel_weight: 1.0
+rel_margin: 0.0
+rel_repr: statistical
+rel_statistical_alpha: 1.0
+rel_min_pixels: 20
+use_dense_depth: true
+relations_dir_train: ./data/nyu_relational/statistical_train
+
+store_freq_epochs: 2.0
+compile: false
