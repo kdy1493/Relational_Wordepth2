@@ -194,6 +194,33 @@ def _make_parser() -> argparse.ArgumentParser:
         help="use torch.compile(model) for faster forward/backward (PyTorch 2+); first epoch can be slower",
     )
 
+    # VKITTI2-specific options (경로/scene/condition 필터)
+    parser.add_argument("--vkitti2_data_path", type=str, default=None, help="VKITTI2 root directory")
+    parser.add_argument("--vkitti2_caption_cache", type=str, default=None, help="VKITTI2 caption/embedding cache")
+    parser.add_argument("--vkitti2_relations_dir", type=str, default=None, help="VKITTI2 relations directory (unused in pure WorDepth)")
+    parser.add_argument(
+        "--vkitti2_scenes",
+        type=str,
+        nargs="+",
+        default=None,
+        help="VKITTI2 scenes to use",
+    )
+    parser.add_argument(
+        "--vkitti2_conditions",
+        type=str,
+        nargs="+",
+        default=None,
+        help="VKITTI2 conditions to use",
+    )
+    parser.add_argument("--vkitti2_input_height", type=int, default=None, help="VKITTI2 input height (override input_height)")
+    parser.add_argument("--vkitti2_input_width", type=int, default=None, help="VKITTI2 input width (override input_width)")
+    parser.add_argument("--vkitti2_max_depth", type=float, default=None, help="VKITTI2 max depth (override max_depth)")
+    parser.add_argument("--vkitti2_min_depth", type=float, default=None, help="VKITTI2 min depth (override min_depth_eval)")
+
+    # Backwards-compat dummy args (encoder/num_filters는 wordepth.py에서 고정이라 여기서는 사용 안 함)
+    parser.add_argument("--encoder", type=str, default="swin_large", help="(ignored) kept for config compatibility")
+    parser.add_argument("--num_filters", type=int, default=512, help="(ignored) kept for config compatibility")
+
     return parser
 
 
@@ -457,8 +484,12 @@ def main_worker(args: argparse.Namespace) -> None:
         text_feat_cache = None
         if is_main:
             logger.info("Baseline mode enabled: baseline_arch (Swin-L + depth decoder only), no text path.")
+    elif args.dataset == "vkitti2":
+        # VKITTI2: text embedding은 dataloader에서 직접 제공하므로 별도 .pt 캐시를 만들지 않는다.
+        text_feat_cache = None
     else:
         text_feat_cache = preload_text_features(args.filenames_file, args.dataset, "train", is_main=is_main)
+
     dataloader = NewDataLoader(args, "train")
     dataloader_eval = None
     if getattr(args, "do_online_eval", False) and getattr(args, "filenames_file_eval", None) and os.path.isfile(args.filenames_file_eval):
@@ -514,6 +545,16 @@ def main_worker(args: argparse.Namespace) -> None:
                 # Image-only baseline: feed zero text embeddings (no disk I/O, no language signal)
                 batch_size = image.size(0)
                 text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+            elif args.dataset == "vkitti2":
+                # VKITTI2: dataloader에서 CLIP embedding(768D)을 제공 → WorDepth text 입력(1024D)으로 패딩
+                if "text_embedding" in sample_batched:
+                    text_emb = sample_batched["text_embedding"].cuda(non_blocking=True)  # [B, 768]
+                    batch_size = text_emb.size(0)
+                    text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
+                    text_feature_list[:, : text_emb.size(1)] = text_emb
+                else:
+                    batch_size = image.size(0)
+                    text_feature_list = torch.zeros(batch_size, 1024, device=image.device, dtype=torch.float32)
             else:
                 text_list = []
                 for i in range(len(sample_batched["sample_path"])):
@@ -582,48 +623,49 @@ def main_worker(args: argparse.Namespace) -> None:
                         periodic_ckpt["ema"] = ema.state_dict()
                     torch.save(periodic_ckpt, os.path.join(out_path, f"model-{global_step}"))
 
-                # Online eval
-                if (
-                    dataloader_eval is not None
-                    and args.do_online_eval
-                    and global_step % args.eval_freq == 0
-                    and not model_just_loaded
-                ):
-                    model.eval()
-                    if ema is not None:
-                        ema.apply_to_model(model)
-                    eval_measures = None
-                    if is_main:
-                        with torch.no_grad():
-                            eval_measures, _ = online_eval(model, dataloader_eval, args, post_process=False)
-                    if use_ddp:
-                        torch.distributed.barrier()
-                    if eval_measures is not None and is_main:
-                        for i in range(9):
+                # Online eval (NYU/KITTI 전용; VKITTI2는 별도 eval_vkitti2.py 사용)
+                if args.dataset != "vkitti2":
+                    if (
+                        dataloader_eval is not None
+                        and args.do_online_eval
+                        and global_step % args.eval_freq == 0
+                        and not model_just_loaded
+                    ):
+                        model.eval()
+                        if ema is not None:
+                            ema.apply_to_model(model)
+                        eval_measures = None
+                        if is_main:
+                            with torch.no_grad():
+                                eval_measures, _ = online_eval(model, dataloader_eval, args, post_process=False)
+                        if use_ddp:
+                            torch.distributed.barrier()
+                        if eval_measures is not None and is_main:
+                            for i in range(9):
+                                if summary_writer is not None:
+                                    summary_writer.add_scalar(eval_metrics[i], eval_measures[i].item(), global_step)
+                                is_lower = i < 6
+                                if is_lower and eval_measures[i] < best_lower[i]:
+                                    old_step, old_val = int(best_steps[i]), float(best_lower[i].item())
+                                    best_lower[i] = eval_measures[i].item()
+                                    best_steps[i] = global_step
+                                    if save_best_only_idx < 0 or i == save_best_only_idx:
+                                        _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
+                                elif not is_lower and eval_measures[i] > best_higher[i - 6]:
+                                    old_step, old_val = int(best_steps[i]), float(best_higher[i - 6].item())
+                                    best_higher[i - 6] = eval_measures[i].item()
+                                    best_steps[i] = global_step
+                                    if save_best_only_idx < 0 or i == save_best_only_idx:
+                                        _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
                             if summary_writer is not None:
-                                summary_writer.add_scalar(eval_metrics[i], eval_measures[i].item(), global_step)
-                            is_lower = i < 6
-                            if is_lower and eval_measures[i] < best_lower[i]:
-                                old_step, old_val = int(best_steps[i]), float(best_lower[i].item())
-                                best_lower[i] = eval_measures[i].item()
-                                best_steps[i] = global_step
-                                if save_best_only_idx < 0 or i == save_best_only_idx:
-                                    _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
-                            elif not is_lower and eval_measures[i] > best_higher[i - 6]:
-                                old_step, old_val = int(best_steps[i]), float(best_higher[i - 6].item())
-                                best_higher[i - 6] = eval_measures[i].item()
-                                best_steps[i] = global_step
-                                if save_best_only_idx < 0 or i == save_best_only_idx:
-                                    _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
-                        if summary_writer is not None:
-                            summary_writer.flush()
-                        append_metrics_json(metrics_path, global_step, eval_measures)
-                        save_best_metrics_json(best_metrics_path, best_lower, best_higher, best_steps)
-                        logger.info("Saved metrics to %s and %s", metrics_path, best_metrics_path)
-                    model.train()
-                    if is_main:
-                        block_print()
-                        enable_print()
+                                summary_writer.flush()
+                            append_metrics_json(metrics_path, global_step, eval_measures)
+                            save_best_metrics_json(best_metrics_path, best_lower, best_higher, best_steps)
+                            logger.info("Saved metrics to %s and %s", metrics_path, best_metrics_path)
+                        model.train()
+                        if is_main:
+                            block_print()
+                            enable_print()
 
             model_just_loaded = False
 
@@ -669,6 +711,13 @@ def _save_best_ckpt(
 args = parse_args()
 if args.dataset in ("kitti", "nyu", "nyu_matched"):
     from dataloaders.dataloader import NewDataLoader  # noqa: E402
+elif args.dataset == "vkitti2":
+    # VKITTI2는 전용 relational dataloader를 사용하지만, 여기서는 Rel loss 없이 순수 WorDepth 학습에만 사용.
+    from dataloaders.vkitti2_relational_dataloader import create_vkitti2_dataloader  # noqa: E402
+
+    def NewDataLoader(dl_args: argparse.Namespace, mode: str):
+        # train.py 인터페이스를 맞추기 위해 wrapper 생성
+        return create_vkitti2_dataloader(dl_args, mode, use_ddp=getattr(dl_args, "use_ddp", False))
 else:
     NewDataLoader = None  # type: ignore[misc, assignment]
 

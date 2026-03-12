@@ -86,6 +86,35 @@ class VKITTI2RelationalDataset(Dataset):
         self.relations_base_path = relations_base_path
         self.caption_cache_dir = caption_cache_dir
         self.is_train = is_train
+        # scenes / conditions가 문자열 또는 "리스트 한 줄짜리 문자열"로 들어오는 경우 보정
+        def _normalize_list_arg(val, default_list):
+            # 이미 리스트고 정상 요소들이면 그대로 사용
+            if isinstance(val, list):
+                # ['Scene01', 'Scene02']처럼 정상인 경우
+                ok = all(isinstance(v, str) and not (v.startswith('[') and v.endswith(']')) for v in val)
+                if ok:
+                    return val
+                # ["['Scene01', 'Scene02']"] 같이 리스트 한 칸에 직렬화된 문자열이 들어온 경우 파싱
+                if len(val) == 1 and isinstance(val[0], str):
+                    raw = val[0]
+                else:
+                    return default_list
+            elif isinstance(val, str):
+                raw = val
+            else:
+                return default_list
+
+            cleaned = raw.strip().strip('[]')
+            parsed = [
+                x.strip().strip("'").strip('"')
+                for x in cleaned.split(',')
+                if x.strip().strip("'").strip('"')
+            ]
+            return parsed or default_list
+
+        scenes = _normalize_list_arg(scenes, self.SCENES)
+        conditions = _normalize_list_arg(conditions, ['clone'])
+
         self.scenes = scenes or self.SCENES
         self.conditions = conditions or ['clone']
         

@@ -1,0 +1,101 @@
+# VKITTI2 Evaluation Config (Scene20)
+# =====================================
+# 학습 완료된 모델을 Scene20에서 평가
+#
+# 사용법:
+#   # Base 모델 평가
+#   python src/eval.py --config configs/arguments_eval_vkitti2.yaml \
+#     --pretrain ./checkpoints/wordepth_vkitti2/model-best.pt
+#
+#   # Relational 모델 평가
+#   python src/eval.py --config configs/arguments_eval_vkitti2.yaml \
+#     --pretrain ./checkpoints/wordepth_vkitti2_relational/model-best.pt
+
+# ============================================================================
+# 기본 설정
+# ============================================================================
+mode: eval
+model_name: vkitti2_eval
+
+# Dataset
+dataset: vkitti2
+
+# ============================================================================
+# VKITTI2 경로 설정
+# ============================================================================
+vkitti2_data_path: ./data/vkitti_2.0.3
+
+# Relational annotations (RSR 계산용)
+vkitti2_relations_dir: ./data/vkitti2_relational
+
+# Caption cache (WorDepth text prior용)
+vkitti2_caption_cache: ./data/vkitti2_captions
+
+# ============================================================================
+# Test Scene 설정
+# ============================================================================
+vkitti2_scenes:
+  - Scene20
+
+vkitti2_conditions:
+  - clone
+
+# ============================================================================
+# Input 설정 (학습과 동일하게)
+# ============================================================================
+vkitti2_input_height: 352
+vkitti2_input_width: 704
+vkitti2_max_depth: 80.0
+vkitti2_min_depth: 0.1
+
+input_height: 352
+input_width: 704
+max_depth: 80.0
+prior_mean: 20.0
+
+# NYU 호환용 더미
+data_path: ./data/vkitti_2.0.3
+gt_path: ./data/vkitti_2.0.3
+filenames_file: ""
+
+# ============================================================================
+# 모델 설정 (학습과 동일하게)
+# ============================================================================
+encoder: swin_large
+num_filters: 512
+
+# WorDepth settings
+weight_kld: 1.0e-3
+alter_prob: 0.5
+legacy: false
+
+# ============================================================================
+# Checkpoint (여기 또는 CLI에서 지정)
+# ============================================================================
+# pretrain: ./checkpoints/wordepth_vkitti2/model-best.pt
+
+# ============================================================================
+# Eval 설정
+# ============================================================================
+batch_size: 1
+num_threads: 4
+
+# ============================================================================
+# RSR 계산 설정
+# ============================================================================
+compute_rsr: true
+rel_statistical_alpha: 1.0
+rel_valid_min_depth: 0.1
+rel_valid_max_depth: 80.0
+rel_min_pixels: 100
+rel_min_valid_pixels: 50
+
+# ============================================================================
+# 출력 설정
+# ============================================================================
+# Qualitative 결과 저장 (선택)
+save_viz: false
+viz_output_dir: ./outputs/vkitti2_eval
+
+# 결과 저장
+results_dir: ./results

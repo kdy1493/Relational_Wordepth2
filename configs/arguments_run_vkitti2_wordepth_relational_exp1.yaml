@@ -1,0 +1,162 @@
+# VKITTI2 + WorDepth + Relational Loss 학습 설정
+# ==============================================
+# NYU WorDepth 구조를 VKITTI2에 적용하고, RelationalDepthLoss를 함께 사용
+#
+# 사용법:
+#   python src/relational_train.py configs/arguments_run_vkitti2_wordepth_relational_exp1.yaml 2>&1 | tee runs/train_vkitti2_wordepth_relational_exp1_$(date +%Y%m%d_%H%M).log
+
+# ============================================================================
+# 기본 설정
+# ============================================================================
+mode: train
+model_name: vkitti2_train_wordepth_relational_exp1
+
+# Dataset
+dataset: vkitti2
+
+# ============================================================================
+# VKITTI2 경로 설정
+# ============================================================================
+# VKITTI2 데이터셋 루트
+vkitti2_data_path: ./data/vkitti_2.0.3
+
+# Relational annotations (masks + relations)
+vkitti2_relations_dir: ./data/vkitti2_relational
+
+# Caption cache (ExpansionNet/BLIP captions + CLIP embeddings)
+vkitti2_caption_cache: ./data/vkitti2_captions
+
+# Scene/Condition 설정 (VKITTI2 전체 사용)
+vkitti2_scenes:
+  - Scene01
+  - Scene02
+  - Scene06
+  - Scene18
+  - Scene20
+
+vkitti2_conditions:
+  - clone
+  - fog
+  - morning
+  - overcast
+  - rain
+  - sunset
+  - 15-deg-left
+  - 15-deg-right
+  - 30-deg-left
+  - 30-deg-right
+
+# Input 크기 (VKITTI2 원본: 1242x375)
+vkitti2_input_height: 352
+vkitti2_input_width: 704
+vkitti2_max_depth: 80.0
+vkitti2_min_depth: 0.1
+
+# Global settings (NYU와 호환성 위해)
+input_height: 352
+input_width: 704
+max_depth: 80.0
+prior_mean: 20.0
+
+# NYU용 더미 설정 (필수 인자 충족용)
+data_path: ./data/vkitti_2.0.3
+gt_path: ./data/vkitti_2.0.3
+filenames_file: ""
+
+# ============================================================================
+# 모델 설정
+# ============================================================================
+# Encoder
+# encoder: swin_large
+
+# # Decoder channels
+# num_filters: 512
+
+# Pre-trained weights (NYU WorDepth에서 finetune 하는 경우 설정)
+# 예시:
+# pretrain: ./runs/nyu_train_wordepth_paper_exp5_dataloader_aligned/model-best_abs_rel.pt
+
+# WorDepth settings (NYU exp5와 유사)
+weight_kld: 1.0e-3
+alter_prob: 0.5
+legacy: false
+
+# ============================================================================
+# Relational Loss 설정
+# ============================================================================
+use_relational_loss: true
+
+# Loss weights
+# VKITTI2는 depth 범위(0.1~80m)가 넓으므로,
+# NYU(0~10m) 대비 margin과 λ를 약간 조정
+rel_weight: 0.05        # L_depth와 비슷한 scale을 유지하는 중간값
+
+# Representative depth: d_k = μ_k + α * σ_k
+rel_statistical_alpha: 1.0
+
+# Hinge margin (meters) — margin=0이면 순서만 맞추고 gap은 강제하지 않음
+rel_margin: 0.0
+
+# Relational loss type: 'statistical' (μ, σ 기반)
+rel_repr: statistical
+
+# Valid depth range for relational loss
+rel_valid_min_depth: 0.1
+rel_valid_max_depth: 80.0
+
+# Minimum pixels
+rel_min_pixels: 100
+rel_min_valid_pixels: 50
+
+# ============================================================================
+# 학습 설정
+# ============================================================================
+# Batch size (per GPU)
+batch_size: 4
+
+# Gradient accumulation
+accumulation_steps: 4
+
+# Epochs
+num_epochs: 25
+
+# Learning rate
+learning_rate: 1.0e-4
+end_learning_rate: 1.0e-6
+
+# Optimizer
+adam_eps: 1.0e-3
+weight_decay: 0.01
+
+# ============================================================================
+# Augmentation
+# ============================================================================
+do_random_rotate: true
+degree: 2.5
+
+# ============================================================================
+# 기타
+# ============================================================================
+num_threads: 4
+use_ddp: false
+log_freq: 100
+save_freq: 1
+
+# Logging
+log_directory: ./logs
+
+# Checkpoint
+checkpoint_path: ./checkpoints
+
+# ============================================================================
+# Evaluation (학습 중 online eval)
+# ============================================================================
+do_online_eval: true
+eval_freq: 1
+
+# Online eval은 validation split 사용
+data_path_eval: ./data/vkitti_2.0.3
+gt_path_eval: ./data/vkitti_2.0.3
+
+
+gpu_ids : "4"

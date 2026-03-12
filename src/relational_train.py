@@ -875,47 +875,48 @@ def main_worker(args: argparse.Namespace) -> None:
                     logger.info("Saved periodic checkpoint at step %d (and model-latest)", global_step)
 
                 # Online eval
-                if (
-                    dataloader_eval is not None
-                    and args.do_online_eval
-                    and global_step % args.eval_freq == 0
-                    and not model_just_loaded
-                ):
-                    model.eval()
-                    if ema is not None:
-                        ema.apply_to_model(model)
-                    eval_measures = None
-                    if is_main:
-                        with torch.no_grad():
-                            eval_measures, _ = online_eval(model, dataloader_eval, args, post_process=False)
-                    if use_ddp:
-                        torch.distributed.barrier()
-                    if eval_measures is not None and is_main:
-                        for i in range(9):
+                if args.dataset != "vkitti2":
+                    if (
+                        dataloader_eval is not None
+                        and args.do_online_eval
+                        and global_step % args.eval_freq == 0
+                        and not model_just_loaded
+                    ):
+                        model.eval()
+                        if ema is not None:
+                            ema.apply_to_model(model)
+                        eval_measures = None
+                        if is_main:
+                            with torch.no_grad():
+                                eval_measures, _ = online_eval(model, dataloader_eval, args, post_process=False)
+                        if use_ddp:
+                            torch.distributed.barrier()
+                        if eval_measures is not None and is_main:
+                            for i in range(9):
+                                if summary_writer is not None:
+                                    summary_writer.add_scalar(eval_metrics[i], eval_measures[i].item(), global_step)
+                                is_lower = i < 6
+                                if is_lower and eval_measures[i] < best_lower[i]:
+                                    old_step, old_val = int(best_steps[i]), float(best_lower[i].item())
+                                    best_lower[i] = eval_measures[i].item()
+                                    best_steps[i] = global_step
+                                    if save_best_only_idx < 0 or i == save_best_only_idx:
+                                        _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
+                                elif not is_lower and eval_measures[i] > best_higher[i - 6]:
+                                    old_step, old_val = int(best_steps[i]), float(best_higher[i - 6].item())
+                                    best_higher[i - 6] = eval_measures[i].item()
+                                    best_steps[i] = global_step
+                                    if save_best_only_idx < 0 or i == save_best_only_idx:
+                                        _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
                             if summary_writer is not None:
-                                summary_writer.add_scalar(eval_metrics[i], eval_measures[i].item(), global_step)
-                            is_lower = i < 6
-                            if is_lower and eval_measures[i] < best_lower[i]:
-                                old_step, old_val = int(best_steps[i]), float(best_lower[i].item())
-                                best_lower[i] = eval_measures[i].item()
-                                best_steps[i] = global_step
-                                if save_best_only_idx < 0 or i == save_best_only_idx:
-                                    _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
-                            elif not is_lower and eval_measures[i] > best_higher[i - 6]:
-                                old_step, old_val = int(best_steps[i]), float(best_higher[i - 6].item())
-                                best_higher[i - 6] = eval_measures[i].item()
-                                best_steps[i] = global_step
-                                if save_best_only_idx < 0 or i == save_best_only_idx:
-                                    _save_best_ckpt(out_path, model, ema, global_step, best_lower, best_higher, best_steps, eval_metrics[i], eval_measures[i], old_step, old_val)
-                        if summary_writer is not None:
-                            summary_writer.flush()
-                        append_metrics_json(metrics_path, global_step, eval_measures)
-                        save_best_metrics_json(best_metrics_path, best_lower, best_higher, best_steps)
-                        logger.info("Saved metrics to %s and %s", metrics_path, best_metrics_path)
-                    model.train()
-                    if is_main:
-                        block_print()
-                        enable_print()
+                                summary_writer.flush()
+                            append_metrics_json(metrics_path, global_step, eval_measures)
+                            save_best_metrics_json(best_metrics_path, best_lower, best_higher, best_steps)
+                            logger.info("Saved metrics to %s and %s", metrics_path, best_metrics_path)
+                        model.train()
+                        if is_main:
+                            block_print()
+                            enable_print()
 
             model_just_loaded = False
 
