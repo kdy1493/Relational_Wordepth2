@@ -173,6 +173,19 @@ class VKITTI2RelationalDataset(Dataset):
             emb_data = np.load(emb_path)
             self.embeddings = {k: emb_data[k] for k in emb_data.files}
             print(f"[Embedding] Loaded {len(self.embeddings)} embeddings")
+            # 키 형식 검증: 샘플 몇 개로 caption_key가 캐시에 있는지 확인
+            if self.samples and self.embeddings:
+                missing = []
+                for sp in self.samples[:20]:
+                    parts = sp.split("/")
+                    if len(parts) >= 3:
+                        ck = f"{parts[0]}/{parts[1]}/rgb_{parts[2]}.jpg"
+                        if ck not in self.embeddings:
+                            missing.append(ck)
+                if missing:
+                    print(f"[경고] 일부 샘플의 caption 키가 캐시에 없음 (키 형식 불일치 가능성). 예: {missing[0]}")
+                else:
+                    print("[Embedding] 키 형식 검증 OK (샘플 20개 기준)")
     
     def _preload_images(self):
         """이미지 캐시 (optional)"""
@@ -347,7 +360,7 @@ class VKITTI2RelationalDataset(Dataset):
             'sample_path': sample_path,
         }
         
-        # Text embedding
+        # Text embedding (키 형식: SceneXX/condition/rgb_XXXXX.jpg — generate_vkitti2_captions.py 출력과 동일)
         if self.use_text_embedding:
             caption_key = f"{sample_path.split('/')[0]}/{sample_path.split('/')[1]}/rgb_{frame_id}.jpg"
             

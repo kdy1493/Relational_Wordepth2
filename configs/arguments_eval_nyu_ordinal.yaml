@@ -1,0 +1,42 @@
+# Ordinal Metrics Evaluation Config (ORD, WHDR)
+# 
+# 사용법:
+#   python scripts/eval_ordinal_metrics.py @configs/arguments_eval_nyu_ordinal.args
+#
+# checkpoint_path만 수정해서 다른 모델 평가 가능
+
+# === 체크포인트 (수정 필요) ===
+checkpoint_path: ./runs/nyu_train_wordepth_paper_exp2_effbatch24/model-best.pt
+
+# === 데이터셋 ===
+dataset: nyu
+data_path_eval: ./data/nyu_v2_sync
+gt_path_eval: ./data/nyu_v2_sync
+filenames_file_eval: ./data_splits/nyudepthv2_test_split.txt
+
+# === 모델 설정 ===
+depth_scale: 6553.5
+input_height: 480
+input_width: 640
+max_depth: 10
+min_depth_eval: 1e-3
+max_depth_eval: 10
+prior_mean: 1.54
+weight_kld: 1e-3
+alter_prob: 0.5
+
+# === Ordinal Metric 설정 ===
+num_pairs: 5000
+ord_threshold: 0.02
+whdr_tau: 0.1
+
+# === Eval 설정 ===
+eigen_crop: true
+post_process: true
+num_threads: 4
+
+# === GPU ===
+gpu_ids: "0"
+
+# === 출력 (선택) ===
+# output_json: ./runs/nyu_train_wordepth_paper_exp2_effbatch24/ordinal_metrics.json

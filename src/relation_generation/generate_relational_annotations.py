@@ -474,28 +474,21 @@ def infer_relations_from_depth_only(
     depth_gt,
     sam_masks=None,
     max_rel_per_object: int = 5,
-    relation_style: str = "median",
 ):
     """
     GT depth만으로 객체 간 front/behind 관계를 생성.
-
-    Args:
-        boxes: bbox 정보 (list of dict: {'id', 'bbox'})
-        depth_gt: ground truth depth (H, W), meters
-        sam_masks: (N, H, W) SAM이 생성한 마스크 (선택)
-        max_rel_per_object: 각 subject 객체가 가질 수 있는 최대 관계 수
-        relation_style: 'median' | 'statistical'
-            - 'median'     : median depth + (0.3m~3.0m) + 공간 인접성 기반 (Relational-WorDepth)
-            - 'statistical': Robustness 논문(μ, σ, M) 기반 관계 추출
+    
+    현재 구현은 Robustness 논문 방식(μ, σ, M 기반)의 statistical 스타일만 지원한다.
     """
-    if relation_style == "statistical":
-        return _infer_relations_statistical_style(
-            boxes=boxes,
-            depth_gt=depth_gt,
-            sam_masks=sam_masks,
-            max_rel_per_object=max_rel_per_object,
-        )
-
+    # 항상 statistical 스타일 사용
+    # (이 아래 median 기반 구현은 제거되었음)
+    return _infer_relations_statistical_style(
+        boxes=boxes,
+        depth_gt=depth_gt,
+        sam_masks=sam_masks,
+        max_rel_per_object=max_rel_per_object,
+    )
+    
     relations = []
 
     if depth_gt.ndim == 3:

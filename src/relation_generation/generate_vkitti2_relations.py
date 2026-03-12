@@ -309,13 +309,75 @@ def process_scene(vkitti2_root, scene, condition, out_dir, sam_model, yolo_model
                 if stats:
                     depth_stats[idx] = stats
         
-        # Generate relations
+        # Generate relations (statistical 방식)
         relations = generate_relations_statistical(
             box_infos,
             depth_stats,
             image.shape,
             max_rel_per_object=getattr(args, "max_rel_per_object", 5),
+            max_centroid_dist=getattr(args, "max_centroid_dist", 0.5),
         )
+
+        # Fallback: 통계 조건으로 아무 관계도 생성되지 않은 경우,
+        # 보수적인 depth 차이 + 공간 인접 조건을 만족하는 객체 쌍만 소량 추가.
+        if not relations and len(box_infos) >= 2 and depth_stats:
+            fb_min_dd = getattr(args, "fallback_min_depth_diff", 2.0)
+            fb_max_dist = getattr(
+                args,
+                "fallback_max_centroid_dist",
+                getattr(args, "max_centroid_dist", 0.6),
+            )
+            fb_max_per_frame = getattr(args, "fallback_max_relations_per_frame", 2)
+
+            H, W = image.shape[:2]
+            candidates = []
+            for i, info_i in enumerate(box_infos):
+                stats_i = depth_stats.get(info_i["id"])
+                if stats_i is None:
+                    continue
+                for j, info_j in enumerate(box_infos):
+                    if i >= j:
+                        continue
+                    stats_j = depth_stats.get(info_j["id"])
+                    if stats_j is None:
+                        continue
+
+                    # mean depth 기반 보수적 조건
+                    mu_i = stats_i["mean"]
+                    mu_j = stats_j["mean"]
+                    depth_diff = abs(mu_i - mu_j)
+                    if depth_diff < fb_min_dd:
+                        continue
+
+                    # 중심 거리 조건 (정규화 거리)
+                    cx_i, cy_i = info_i["centroid"]
+                    cx_j, cy_j = info_j["centroid"]
+                    norm_dist = np.sqrt(((cx_i - cx_j) / W) ** 2 + ((cy_i - cy_j) / H) ** 2)
+                    if norm_dist > fb_max_dist:
+                        continue
+
+                    candidates.append((depth_diff, info_i, info_j, mu_i, mu_j))
+
+            # 깊이 차이가 작은 것부터 소수만 선택
+            candidates.sort(key=lambda x: x[0])
+            for k, (depth_diff, info_i, info_j, mu_i, mu_j) in enumerate(candidates[:fb_max_per_frame]):
+                if mu_i < mu_j:
+                    front_info, back_info = info_i, info_j
+                else:
+                    front_info, back_info = info_j, info_i
+
+                relations.append(
+                    {
+                        "subject_idx": front_info["id"],
+                        "object_idx": back_info["id"],
+                        "subject_class": front_info["class_name"],
+                        "object_class": back_info["class_name"],
+                        "relation": "in_front_of",
+                        "confidence": min(0.9, 0.6 + depth_diff / 10.0),
+                        "depth_diff": float(depth_diff),
+                        "fallback": True,
+                    }
+                )
         
         total_relations += len(relations)
         

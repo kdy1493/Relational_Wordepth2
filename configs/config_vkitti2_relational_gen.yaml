@@ -29,13 +29,11 @@ scenes: null
 # 처리할 환경 조건 (clone이 기본)
 conditions:
   - clone
-# conditions:
-#   - clone
-#   - fog
-#   - morning
-#   - overcast
-#   - rain
-#   - sunset
+  - fog
+  - morning
+  - overcast
+  - rain
+  - sunset
 
 # ============================================================================
 # SAM2 + YOLO-World 설정
@@ -44,8 +42,8 @@ sam_ckpt: ./sam2_b.pt
 yolo_ckpt: ./yolov8x-worldv2.pt
 
 sam_points_per_side: 8
-sam_min_region_area: 500
-yolo_conf_thresh: 0.5
+sam_min_region_area: 300   # VKITTI2: 작은 차량/보행자도 포함하도록 완화
+yolo_conf_thresh: 0.25     # 검출 수를 더 늘리되, 너무 낮추지는 않음
 sam_max_objects: 20
 
 # ============================================================================
@@ -58,16 +56,24 @@ relation_style: statistical
 # 객체당 최대 relation 수
 max_rel_per_object: 5
 
+# 중심 거리 최대값 (정규화 거리). 도로씬 특성상 NYU보다 조금 더 완화.
+max_centroid_dist: 0.8
+
 # 깊이 범위 (미터)
 min_depth: 0.1
 max_depth: 80.0
 
+# Fallback relation 설정: 통계 조건으로 아무 관계도 안 나올 때만 사용.
+fallback_min_depth_diff: 2.0        # 두 객체 mean depth 차이가 2m 이상일 때만
+fallback_max_centroid_dist: 0.6     # 서로 너무 멀면 사용 안 함
+fallback_max_relations_per_frame: 2 # 한 프레임당 fallback으로 추가할 최대 관계 수
+
 # ============================================================================
 # 기타
 # ============================================================================
-device: cuda:0
+device: cuda:6
 
 # 디버그 모드 (시각화 저장)
 debug: false
-visualize: false
+visualize: true
 

@@ -265,7 +265,8 @@ def run_eval_only() -> None:
     if num_samples > 0:
         out_dir = os.path.dirname(os.path.abspath(args.checkpoint_path))
         ckpt_stem = os.path.splitext(os.path.basename(args.checkpoint_path))[0]
-        out_path = os.path.join(out_dir, f"eval_results_{ckpt_stem}.json")
+        pp_suffix = "pptrue" if post_process else "ppfalse"
+        out_path = os.path.join(out_dir, f"eval_results_{ckpt_stem}_{pp_suffix}.json")
         results = {
             "checkpoint_path": args.checkpoint_path,
             "post_process": post_process,

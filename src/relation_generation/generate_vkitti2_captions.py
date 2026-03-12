@@ -121,12 +121,29 @@ class CLIPEncoder:
         inputs = self.processor(text=[text], return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
-        features = self.model.get_text_features(**inputs)
+        out = self.model.get_text_features(**inputs)
+        # HuggingFace 버전에 따라 tensor 또는 BaseModelOutputWithPooling 반환
+        if isinstance(out, torch.Tensor):
+            features = out
+        else:
+            pooler = getattr(out, "pooler_output", None)
+            last_h = getattr(out, "last_hidden_state", None)
+            if pooler is not None:
+                features = pooler
+            elif last_h is not None:
+                features = last_h[:, 0]  # CLS token
+            else:
+                raise ValueError("CLIP output에서 embedding tensor를 찾을 수 없음")
         return features.cpu().numpy()  # [1, 768]
 
 
+# VKITTI2 caption/embedding 키 형식 (dataloader와 동일해야 함)
+# key = "{scene}/{condition}/{rgb_filename}"  e.g. "Scene01/clone/rgb_00000.jpg"
+# dataloader: caption_key = f"{scene}/{condition}/rgb_{frame_id}.jpg" (frame_id = "00000") → 동일
+
+
 def scan_vkitti2(vkitti2_root, scenes=None, conditions=None):
-    """VKITTI2 이미지 목록 스캔"""
+    """VKITTI2 이미지 목록 스캔. key 형식: SceneXX/condition/rgb_XXXXX.jpg (dataloader lookup과 일치)"""
     scenes = scenes or ["Scene01", "Scene02", "Scene06", "Scene18", "Scene20"]
     conditions = conditions or ["clone"]
     
@@ -145,7 +162,7 @@ def scan_vkitti2(vkitti2_root, scenes=None, conditions=None):
                 samples.append(
                     {
                         "path": os.path.join(rgb_dir, rgb_file),
-                        "key": f"{scene}/{condition}/{rgb_file}",
+                        "key": f"{scene}/{condition}/{rgb_file}",  # e.g. Scene01/clone/rgb_00000.jpg
                     }
                 )
     
@@ -207,6 +224,22 @@ def process_all(vkitti2_root, output_dir, scenes=None, conditions=None, device: 
     emb_path = os.path.join(output_dir, "vkitti2_embeddings.npz")
     np.savez_compressed(emb_path, **embeddings)
     
+    # 검증: 저장된 키가 스캔한 전체 목록과 일치하는지 확인 (한 번에 정확히 나오는지)
+    expected_keys = {s["key"] for s in samples}
+    missing_in_emb = expected_keys - set(embeddings.keys())
+    missing_in_cap = expected_keys - set(captions.keys())
+    if missing_in_emb or missing_in_cap:
+        print(f"\n[경고] 일부 샘플이 실패하여 누락됨: embedding {len(missing_in_emb)}개, caption {len(missing_in_cap)}개")
+        if missing_in_emb and len(missing_in_emb) <= 5:
+            print("  누락 embedding 키 예:", list(missing_in_emb)[:5])
+    else:
+        print(f"\n[검증] 모든 {len(expected_keys)}개 샘플에 대해 caption/embedding 키 일치.")
+    for k in list(embeddings.keys())[:1]:
+        arr = np.asarray(embeddings[k])
+        if arr.shape != (768,):
+            print(f"[경고] embedding shape이 (768,)이 아님: {k} -> {arr.shape}")
+        break
+
     print(f"\nSaved {len(captions)} captions to: {caption_path}")
     print(f"Saved {len(embeddings)} embeddings to: {emb_path}")
 
